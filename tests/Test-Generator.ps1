@@ -183,14 +183,14 @@ function Invoke-Generator([string]$Scenario, [int]$ExpectedReused, [int]$Expecte
   Assert-Equal "$Scenario no legacy parser migration" $data.refresh.migrated 0
   Assert-RefreshCosts $Scenario $data $expectedCosts $cacheRoot
   $manifest = Read-JsonFile $manifestPath
-  Assert-Equal "$Scenario manifest cache version" $manifest.version 5
+  Assert-Equal "$Scenario manifest cache version" $manifest.version 7
   Assert-Equal "$Scenario manifest parser matches source" $manifest.parser $expectedParserFingerprint
   foreach ($entry in @($manifest.files)) {
     $record = Read-JsonFile (Join-Path $cacheRoot ([string]$entry.cache + '.json'))
     Assert-Equal "$Scenario manifest key is SHA256" ([string]$entry.key -match '^[a-f0-9]{64}$') $true
     Assert-Equal "$Scenario manifest cache matches key" $entry.cache $entry.key
     Assert-Equal "$Scenario manifest omits source path" ($null -eq $entry.PSObject.Properties['path']) $true
-    Assert-Equal "$Scenario cache record version $($entry.key)" $record.version 5
+    Assert-Equal "$Scenario cache record version $($entry.key)" $record.version 7
     Assert-Equal "$Scenario cache parser matches source $($entry.key)" $record.parser $expectedParserFingerprint
   }
   Assert-Equal "$Scenario HTML was generated" (Test-Path -LiteralPath (Join-Path $outputRoot 'codex-usage-dashboard.html')) $true
@@ -403,7 +403,7 @@ function Assert-SkillPrivacy([string]$Scenario) {
     Assert-Equal "$Scenario output privacy $($file.Name)" $safe $true
   }
   $manifest = Read-JsonFile $skillManifestPath
-  Assert-Equal "$Scenario skill manifest version" $manifest.version 5
+  Assert-Equal "$Scenario skill manifest version" $manifest.version 7
   Assert-Equal "$Scenario skill manifest parser matches source" $manifest.parser $expectedParserFingerprint
   foreach ($entry in @($manifest.files)) {
     Assert-Equal "$Scenario skill manifest only safe keys" ((@($entry.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'cache,key,signature') $true
@@ -647,7 +647,7 @@ try {
 
   $recordPath = Get-CacheRecordPath '03-empty.jsonl'
   $validParser = (Read-JsonFile $recordPath).parser
-  Write-JsonFile $recordPath ([ordered]@{ version = 5; parser = $validParser; events = [pscustomobject]@{} })
+  Write-JsonFile $recordPath ([ordered]@{ version = 7; parser = $validParser; events = [pscustomobject]@{} })
   Invoke-Generator '06-invalid-event-shape-rebuild' 2 1 @('sessions\03-empty.jsonl')
 
   [IO.File]::WriteAllText($manifestPath, '{ invalid manifest', [Text.UTF8Encoding]::new($false))
@@ -667,7 +667,7 @@ try {
   Invoke-SkillGenerator '09-skill-cold' 0 11
   Invoke-SkillGenerator '10-skill-warm' 11 0
 
-  # A version-4 cache may contain local paths. Migration must rebuild to safe version 5.
+  # A version-4 cache may contain local paths. Migration must rebuild to version 7.
   $manifest = Read-JsonFile $skillManifestPath
   $manifest.version = 4
   foreach ($entry in @($manifest.files)) {
@@ -703,10 +703,10 @@ try {
   Write-JsonFile $skillRecordPath $record
   Invoke-SkillGenerator '16-record-parser-mismatch-rebuild' 10 1 $true -ExpectedReparsedFiles @('sessions\02-second-task.jsonl')
 
-  # Only the explicitly verified former whole-script fingerprint can migrate hot.
+  # The former parser omitted real thread identity and cannot migrate hot.
   $legacyParser = '431a6296a6f8d46b7807bb2ed0f83e467d4e66f75616431d61d45a40be27e664'
   Set-SyntheticCacheParser $skillCacheRoot $legacyParser
-  Invoke-SkillGenerator '17-verified-legacy-parser-hot-migration' 11 0 $true -ExpectedMigrated 11
+  Invoke-SkillGenerator '17-legacy-attribution-parser-rebuild' 0 11 $true
 
   # Change only a copied generator and copied web source under this run directory.
   $isolatedProject = Join-Path $runRoot 'fingerprint-project'

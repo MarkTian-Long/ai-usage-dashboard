@@ -68,6 +68,20 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
   background: #16284c; color: #fff; border-radius: 6px; padding: 6px; white-space: nowrap;
   font-size: 11px; font-style: normal; z-index: 3;
 }
+.usage-calendar { position: relative; gap: 3px; overflow: visible; }
+.usage-calendar .barcol { flex: 1 1 0; min-width: 0; position: relative; }
+.usage-calendar.usage-dense { gap: 0; }
+.usage-day:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; z-index: 4; }
+.usage-day-missing::before, .usage-day-zero::before { content: ''; position: absolute; bottom: 0; left: 0; right: 0; border-bottom: 2px dashed #a5afc0; }
+.usage-day-zero::before { border-bottom: 2px solid var(--blue); }
+.usage-day:hover::after, .usage-day:focus-visible::after {
+  content: attr(data-tip); position: absolute; bottom: 102%; left: 50%; transform: translateX(-50%);
+  background: #16284c; color: #fff; border-radius: 6px; padding: 6px; white-space: nowrap; font-size: 11px; z-index: 5;
+}
+.usage-label-left:hover::after, .usage-label-left:focus-visible::after { left: 0; transform: none; }
+.usage-label-right:hover::after, .usage-label-right:focus-visible::after { left: auto; right: 0; transform: none; }
+.usage-calendar.usage-sparse { display: block; }
+.usage-sparse .barcol { position: absolute; bottom: 0; min-width: 1px; }
 .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 8px; }
 .row { display: grid; grid-template-columns: minmax(66px, 1fr) minmax(36px, 1.15fr) minmax(62px, .8fr); gap: 7px; align-items: center; font-size: 12px; margin: 10px 0; }
 .row > span { overflow-wrap: anywhere; min-width: 0; }

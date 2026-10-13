@@ -26,7 +26,8 @@
 - web/dashboard.html、web/dashboard.css、web/dashboard.js 是页面源；生成器将其内联到 codex-usage-dashboard.html，无需外部 CDN。
 - JSONL 来自 SourceRoot、默认 Codex 目录或既有 CODEX_HOME。只提取结构性事件与数值统计；Skill 代理指标额外识别真实工具调用中读取 SKILL.md 的字面量命令，仅保存脱敏标识与计数，不保存完整工具参数。不输出对话正文，不访问认证文件，不上传数据。
 - .codex-usage-dashboard-cache/、HTML、数据 JSON 是可重建生成物。不要直接编辑。
-- 缓存版本 5 延续 UTC 日期解析及缺失时长语义，保存 Skill 说明读取事件，源文件清单使用路径哈希。按文件长度、修改时间与读取函数指纹复用；仅汇总或 web 界面修改不触发全量重读。已验收的旧 v5 全文指纹可一次性热迁移。旧版本、未知指纹、空对象或损坏缓存会重新解析；Skill 窗口每次刷新重新计算。
+- 缓存版本 7 保存实际线程身份、逐条模型/强度/范围，以及逐请求消耗和响应哈希。对已匹配响应及已覆盖数值状态不补计，缺失消耗按响应身份全局去重后补计。延续 UTC 日期解析、缺失时长及 Skill 说明读取语义，源文件清单使用路径哈希。按文件长度、修改时间与读取函数指纹复用；仅汇总或 web 界面修改不触发全量重读。v5 缺少线程归属，v6 缺少逐请求消耗，均必须从只读日志重建，不能热迁移。旧版本、未知指纹、空对象、缺失归属或损坏缓存会重新解析；Skill 窗口每次刷新重新计算。
+- Token、请求与压缩共享“任务用量（含子代理）／自动安全审查／全部 Token”筛选，默认任务范围。按实际线程 ID 绑定上下文和设置，父任务的 session_id 不用于混合子线程。全部 Token 保留两类原始用量；不转换为官方套餐或付费额度。
 - 每次汇总仍枚举全部源文件元数据，变化文件从头解析，未变化的读精简缓存，属于文件级增量。数据 JSON/HTML/清单覆盖写入，不按次数留完整快照；源文件迁移可能留下孤立缓存，日志目前无轮转。刷新成本字段用于观察文件复用与体积，详细口径见 docs/skill-read-metrics.md。
 - codex-usage-dashboard-service.log 只记录受控运行消息与退出码，不记录原始会话或异常正文。
 
@@ -37,6 +38,10 @@
     node .\tests\Test-Frontend.cjs
     pwsh -NoProfile -File .\tests\Test-Generator.ps1
     powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Generator.ps1
+    pwsh -NoProfile -File .\tests\Test-TokenFallback.ps1
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenFallback.ps1
+    pwsh -NoProfile -File .\tests\Test-TokenAttribution.ps1
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenAttribution.ps1
     pwsh -NoProfile -File .\tests\Test-Service.ps1 -ServiceHost pwsh
     pwsh -NoProfile -File .\tests\Test-Service.ps1 -ServiceHost powershell.exe
     pwsh -NoProfile -File .\tests\Test-UiContract.ps1

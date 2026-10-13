@@ -15,10 +15,14 @@ $markers+=@('dashboard-skill-explorer-v2','id="skillFilters"','id="skillCards"',
 $markers+=@('id="skillYAxis"','id="skillTrendReadout"','id="skillInspectDate"','id="skillMetadataNote"',
   'skill-bar-value','展开完整简介','不是历史版本','metadataAsOf')
 $markers+=@('id="usagePreset"','id="usageRangeError"','全部模型','全部推理强度','currentDescriptionZh','展开中英对照','中文释义')
+$markers+=@('dashboard-usage-scope-v1','id="usageScope"','id="usageScopeNote"','任务用量（含子代理）','自动安全审查',
+  'usageScopeSchema','不代表官方套餐额度占比','按实际线程 ID 去重','Token 统计范围数据格式无效')
 $markers+=@('id="skillScope"','id="skillCategory"','id="skillComposer"','id="skillPromptPreview"','id="skillCopyPrompt"',
   'inventoryAsOf','directoryState','SKILL_CATEGORIES','SKILL_WORKFLOWS','BUNDLE_KEY','known_local_skill_roots')
 if(-not $html.Contains('//__SKILL_DESCRIPTIONS_ZH__')){throw 'Source UI missing the local Chinese description asset placeholder.'}
 if($html.Contains('data-range=')){throw 'Date presets must have one primary select in each filter group.'}
+if(-not $html.Contains('<option value="task" selected>任务用量（含子代理）</option><option value="auto_review">自动安全审查</option><option value="all">全部 Token</option>')){throw 'Token scopes must expose task, automatic safety review and all raw tokens with task as default.'}
+if($html.IndexOf('id="usageScope"') -le $html.IndexOf('id="end"') -or $html.IndexOf('id="usageScope"') -ge $html.IndexOf('id="model"')){throw 'Token scope must follow dates and precede model selection.'}
 foreach($marker in $markers){
   if(-not $content.Contains($marker)){throw "UI contract missing: $marker"}
 }

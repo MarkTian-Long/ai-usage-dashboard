@@ -13,7 +13,7 @@ $out=Join-Path $OutputRoot 'codex-usage-dashboard.html'
 $dataOut=Join-Path $OutputRoot 'codex-usage-dashboard-data.json'
 $cacheDir=Join-Path $OutputRoot '.codex-usage-dashboard-cache'
 $manifestPath=Join-Path $cacheDir 'manifest.json'
-$cacheVersion=5
+$cacheVersion=7
 $tz=[TimeSpan]::FromHours(8)
 $m=New-Object Threading.Mutex($false,$MutexName)
 if(-not $m.WaitOne(300000)){exit 23}
@@ -37,11 +37,31 @@ try {
   function Seconds($o,$name){
     $property=$o.PSObject.Properties[$name]
     if($null -eq $property -or $null -eq $property.Value){return $null}
+    if($property.Value -is [bool] -or $property.Value -is [string]){return $null}
     try {
       $value=[double]$property.Value
       if([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0){return $null}
       return $value/1000
     } catch {return $null}
+  }
+  function UsageVector($value){
+    if($null -eq $value){return $null}
+    $values=@()
+    foreach($name in 'input_tokens','cached_input_tokens','output_tokens','reasoning_output_tokens'){
+      $property=$value.PSObject.Properties[$name]
+      if($null -eq $property){if($name -in 'input_tokens','output_tokens'){return $null};$values+=0;continue}
+      $number=$property.Value
+      if($null -eq $number -or $number -is [bool] -or $number -is [string]){return $null}
+      try {$numeric=[double]$number}catch{return $null}
+      if([double]::IsNaN($numeric) -or [double]::IsInfinity($numeric) -or $numeric -lt 0 -or $numeric -gt 9007199254740991 -or [Math]::Floor($numeric) -ne $numeric){return $null}
+      $values+=[int64]$number
+    }
+    if($values[1] -gt $values[0] -or $values[3] -gt $values[2]){return $null}
+    return ,@($values[0],$values[1],$values[2],$values[3],($values[0]+$values[2]))
+  }
+  function UsageState($event){
+    # Ignore reported totals: input/output are the consumption basis.
+    [string]$event.s+'|'+(@($event.l)[0..3]-join '|')+'|'+(@($event.t)[0..3]-join '|')
   }
   function WriteAtomicText([string]$path,[string]$content){
     $temporary=$path+'.tmp'
@@ -69,6 +89,17 @@ try {
       if($value -and $value.Value){
         if($value.Value -is [string]){if($value.Value -match 'guardian|subagent'){return $true}}
         elseif($value.Value.PSObject.Properties['subagent'] -or $value.Value.PSObject.Properties['guardian']){return $true}
+      }
+    }
+    return $false
+  }
+  function AutoReviewSession($p){
+    if((T $p thread_source) -match 'guardian|auto_review' -or (T $p agent_role) -match 'guardian|auto_review'){return $true}
+    foreach($field in 'source','thread_source'){
+      $value=$p.PSObject.Properties[$field]
+      if($value -and $value.Value){
+        if($value.Value -is [string]){if($value.Value -match 'guardian|auto_review'){return $true}}
+        elseif((T $value.Value.subagent other) -eq 'guardian' -or $value.Value.PSObject.Properties['guardian']){return $true}
       }
     }
     return $false
@@ -233,7 +264,8 @@ try {
   }
   function ReadEvents($file){
     $events=[Collections.Generic.List[object]]::new()
-    $reader=$null;$sid=$null;$lineNo=0;$turn=$null;$cwd=$null;$fileExcludeSkills=$false
+    $reader=$null;$sid=$null;$lineNo=0;$turn=$null;$cwd=$null;$fileExcludeSkills=$false;$pendingUsage=$null
+    $mo='unknown';$ef='unknown';$fileScope='task'
     try {
       $reader=[IO.StreamReader]::new([IO.File]::Open($file.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite))
       while(($line=$reader.ReadLine()) -ne $null){
@@ -241,14 +273,26 @@ try {
         try {$x=$line|ConvertFrom-Json -EA Stop}catch{continue}
         $p=$x.payload;$kind=T $p type;if(!$kind){$kind=T $x type}
         if($kind -eq 'session_meta'){
-          $sid=T $p session_id;if(!$sid){$sid=T $p id};$turn=$null;$cwd=T $p cwd
+          # id is the actual thread; session_id can name its parent task.
+          $sid=T $p id;if(!$sid){$sid=T $p session_id};$turn=$null;$cwd=T $p cwd;$pendingUsage=$null
+          if(AutoReviewSession $p){$fileScope='auto_review'}
           if(ExcludeSkillSession $p){$fileExcludeSkills=$true};continue
         }
-        if((T $x type) -eq 'turn_context'){$turn=T $p turn_id;if(T $p cwd){$cwd=T $p cwd};continue}
+        if((T $x type) -eq 'turn_context'){
+          $turn=T $p turn_id;if(T $p cwd){$cwd=T $p cwd}
+          if(T $p model){$mo=T $p model}
+          $effort=T $p effort;if(!$effort){$effort=T $p reasoning_effort};if($effort){$ef=$effort}
+          continue
+        }
+        if($kind -eq 'thread_settings_applied'){
+          $settings=$p.thread_settings
+          if(T $settings model){$mo=T $settings model}
+          $effort=T $settings reasoning_effort;if(!$effort){$effort=T $settings effort};if($effort){$ef=$effort}
+        }
         if($kind -eq 'task_started'){$turn=T $p turn_id}
         if((T $x type) -eq 'response_item' -and $kind -in 'custom_tool_call','function_call'){
           $callTurn=T $p turn_id;if(-not $callTurn){$callTurn=$turn}
-          $session=T $p session_id;if(-not $session){$session=$sid}
+          $session=$sid;if(-not $session){$session=T $p session_id}
           if(-not $fileExcludeSkills -and $session -and $callTurn){
             try {$at=ParseTimestamp $x.timestamp}catch{continue}
             foreach($skill in @(ToolSkillReads $p $cwd)){
@@ -258,20 +302,33 @@ try {
           continue
         }
         if($kind -in 'task_complete','turn_aborted'){$turn=$null}
-        if($kind -notin 'token_count','thread_settings_applied','task_started','task_complete','compacted','context_compacted'){continue}
-        $session=T $p session_id;if(!$session){$session=$sid};if(!$session){continue}
+        if($kind -notin 'token_count','token_usage_record','thread_settings_applied','task_started','task_complete','compacted','context_compacted'){continue}
+        $session=$sid;if(!$session){$session=T $p session_id};if(!$session){continue}
         try {$at=ParseTimestamp $x.timestamp}catch{continue}
-        $e=[ordered]@{s=$session;a=$at.ToUniversalTime().ToString('o');i=$lineNo;k=$kind}
+        # Bind attribution in the source thread before combining any files.
+        $scope=if($fileScope -eq 'auto_review' -or $mo -eq 'codex-auto-review'){'auto_review'}else{'task'}
+        $e=[ordered]@{s=$session;a=$at.ToUniversalTime().ToString('o');i=$lineNo;k=$kind;mo=$mo;ef=$ef;sc=$scope}
         switch($kind){
+          'token_usage_record' {
+            $pendingUsage=$null
+            $response=T $p response_id;$last=UsageVector $p.usage;$cumulative=UsageVector $p.thread_token_usage
+            if($response -and $null -ne $last -and $null -ne $cumulative){
+              $recordTurn=T $p turn_id;if(!$recordTurn){$recordTurn=$turn};if($recordTurn){$e.turn=$recordTurn}
+              $e.r=PathKey $response;$e.l=$last;$e.t=$cumulative
+              $pendingUsage=[pscustomobject]$e;$events.Add($pendingUsage)
+            }
+          }
           'token_count' {
             $z=$p.info
             if($z -and $z.last_token_usage){
+              $tokenTurn=T $p turn_id;if(!$tokenTurn){$tokenTurn=$turn};if($tokenTurn){$e.turn=$tokenTurn}
               $e.l=@((N $z.last_token_usage input_tokens),(N $z.last_token_usage cached_input_tokens),(N $z.last_token_usage output_tokens),(N $z.last_token_usage reasoning_output_tokens),(N $z.last_token_usage total_tokens))
               if($z.total_token_usage){$e.t=@((N $z.total_token_usage input_tokens),(N $z.total_token_usage cached_input_tokens),(N $z.total_token_usage output_tokens),(N $z.total_token_usage reasoning_output_tokens),(N $z.total_token_usage total_tokens))}else{$e.t=@(0,0,0,0,0)}
+              if($pendingUsage -and $pendingUsage.s -eq $session -and (@($pendingUsage.l)[0..3]-join '|') -eq (@($e.l)[0..3]-join '|')){$e.r=$pendingUsage.r;$pendingUsage=$null}
               $events.Add([pscustomobject]$e)
             }
           }
-          'thread_settings_applied' {$z=$p.thread_settings;$e.mo=T $z model;$e.ef=T $z reasoning_effort;$events.Add([pscustomobject]$e)}
+          'thread_settings_applied' {$events.Add([pscustomobject]$e)}
           'task_started' {if(T $p turn_id){$e.turn=T $p turn_id;$events.Add([pscustomobject]$e)}}
           'task_complete' {
             if(T $p turn_id){
@@ -288,7 +345,10 @@ try {
       }
     } finally {if($reader){$reader.Dispose()}}
     # Enumerate explicitly; Windows PowerShell can serialize an empty List as {}.
-    foreach($event in $events){if($event.k -ne 'skill_read' -or -not $fileExcludeSkills){$event}}
+    foreach($event in $events){
+      if($event.k -ne 'skill_read' -and $fileScope -eq 'auto_review'){$event.sc='auto_review'}
+      if($event.k -ne 'skill_read' -or -not $fileExcludeSkills){$event}
+    }
   }
 
   function GetParserFingerprint([string]$SourceText){
@@ -297,7 +357,7 @@ try {
     $parseTokens=$null;$parseErrors=$null
     $ast=[System.Management.Automation.Language.Parser]::ParseInput($SourceText,[ref]$parseTokens,[ref]$parseErrors)
     if($parseErrors.Count){throw 'Cannot fingerprint an invalid generator'}
-    $names=@('T','N','ParseTimestamp','Seconds','PathKey','ExcludeSkillSession','LiteralValue','NormalizeSkillPath','SkillIdentity','ShellSkillReads','DecodeJsString','WrappedCommands','ToolSkillReads','ReadEvents')
+    $names=@('T','N','ParseTimestamp','Seconds','UsageVector','PathKey','ExcludeSkillSession','AutoReviewSession','LiteralValue','NormalizeSkillPath','SkillIdentity','ShellSkillReads','DecodeJsString','WrappedCommands','ToolSkillReads','ReadEvents')
     $parts=@(foreach($name in $names){
       $fn=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
       if(-not $fn){throw 'Missing event parser function'}
@@ -476,11 +536,8 @@ try {
   if(-not (Test-Path -LiteralPath $cacheDir)){New-Item -ItemType Directory -Path $cacheDir -Force|Out-Null}
   $parserFingerprint=GetParserFingerprint ([IO.File]::ReadAllText($PSCommandPath))
   $compatibleParsers=@($parserFingerprint)
-  # One verified v5 extraction implementation is byte-for-byte unchanged. Its
-  # former whole-script fingerprint can be migrated without rereading JSONL.
-  if($parserFingerprint -eq 'da8313aea08170e9d9592446de45bf6965cac6e586ccbd4a33ad6f8a3a058e94'){
-    $compatibleParsers+='431a6296a6f8d46b7807bb2ed0f83e467d4e66f75616431d61d45a40be27e664'
-  }
+  # Older caches lack actual attribution or per-response consumption records.
+  # They must be rebuilt from read-only source logs, never migrated hot.
   $old=@()
   if(Test-Path -LiteralPath $manifestPath){try{$manifestData=Get-Content -Raw $manifestPath|ConvertFrom-Json;if($manifestData.version -eq $cacheVersion -and $manifestData.parser -in $compatibleParsers){$old=@($manifestData.files)}}catch{$old=@()}}
   $oldByPath=@{}
@@ -491,7 +548,7 @@ try {
   $skillHomeParentKey=NormalizeSkillPath $skillHomeParent ''
   $roots=@((Join-Path $codexHome 'sessions'),(Join-Path $codexHome 'archived_sessions'))|?{Test-Path -LiteralPath $_}
   $files=@($roots|%{Get-ChildItem -LiteralPath $_ -Recurse -File -Filter *.jsonl -EA SilentlyContinue})
-  $allEvents=[Collections.Generic.List[object]]::new();$newManifest=[Collections.Generic.List[object]]::new();$reused=0;$reparsed=0
+  $allEvents=[Collections.Generic.List[object]]::new();$newManifest=[Collections.Generic.List[object]]::new();$reused=0;$reparsed=0;$matchedResponses=@{}
   [long]$sourceBytes=0;[long]$sourceBytesRead=0;[long]$cacheBytesRead=0;[long]$cacheBytes=0;$migrated=0
   foreach($file in $files){
     $path=$file.FullName;$sig=EventSignature $file;$key=PathKey $path;$cache=Join-Path $cacheDir ($key+'.json');$previous=$oldByPath[$key];$events=$null;$rewriteCache=$false
@@ -507,7 +564,15 @@ try {
             if(-not $event.s -or -not $event.k -or -not $event.a){throw 'Invalid cached event'}
             $event.a=(ParseTimestamp $event.a).ToUniversalTime().ToString('o')
             if($event.k -eq 'skill_read' -and (-not $event.turn -or -not $event.skill -or $event.source -notin 'personal','workspace','system','plugin','unknown')){throw 'Invalid skill cache'}
+            if($event.k -ne 'skill_read' -and (-not $event.mo -or -not $event.ef -or $event.sc -notin 'task','auto_review')){throw 'Invalid attribution cache'}
             if($event.k -eq 'token_count' -and (@($event.l).Count -ne 5 -or @($event.t).Count -ne 5)){throw 'Invalid token cache'}
+            if($event.k -eq 'token_usage_record'){
+              if($event.r -notmatch '^[a-f0-9]{64}$' -or @($event.l).Count -ne 5 -or @($event.t).Count -ne 5){throw 'Invalid response usage cache'}
+              foreach($vector in @($event.l,$event.t)){
+                foreach($number in $vector){if($null -eq $number -or $number -is [bool] -or $number -is [string] -or [double]$number -lt 0 -or [double]$number -gt 9007199254740991 -or [double]::IsNaN([double]$number) -or [double]::IsInfinity([double]$number) -or [Math]::Floor([double]$number) -ne [double]$number){throw 'Invalid response usage values'}}
+                if($vector[1] -gt $vector[0] -or $vector[3] -gt $vector[2] -or $vector[4] -ne $vector[0]+$vector[2]){throw 'Invalid response usage composition'}
+              }
+            }
           }
           $events=$candidate
           if($cacheData.parser -ne $parserFingerprint){$rewriteCache=$true;$migrated++}
@@ -527,35 +592,89 @@ try {
     }
     $cacheBytes+=(Get-Item -LiteralPath $cache).Length
     $newManifest.Add([ordered]@{key=$key;signature=$sig;cache=$key})
-    foreach($event in @($events)){$allEvents.Add($event)}
+    # Validate response linkage against source order and task boundaries on every
+    # aggregation, including warm caches. The extracted r on token_count is only
+    # a candidate; identical usage in a later turn cannot cover an older response.
+    $pendingResponses=@{}
+    foreach($event in @($events)){
+      $session=[string]$event.s
+      if($event.k -eq 'token_usage_record'){$pendingResponses[$session]=$event}
+      elseif($event.k -in 'task_started','task_complete'){$pendingResponses.Remove($session)}
+      elseif($event.k -eq 'token_count'){
+        $proven=$false
+        if([int64]$event.l[0]+[int64]$event.l[2] -gt 0){
+          $pending=$pendingResponses[$session]
+          if($pending -and (T $pending turn) -eq (T $event turn) -and (@($pending.l)[0..3]-join '|') -eq (@($event.l)[0..3]-join '|')){$proven=$true;$matchedResponses[[string]$pending.r]=$true}
+          $pendingResponses.Remove($session)
+        }
+        $event|Add-Member -NotePropertyName provenResponse -NotePropertyValue $proven -Force
+      }
+      $allEvents.Add($event)
+    }
   }
   $manifest=[ordered]@{version=$cacheVersion;parser=$parserFingerprint;generated=([DateTimeOffset]::UtcNow.ToString('o'));files=@($newManifest)}
 
-  $usage=@{};$tasks=@{};$compact=@{};$sn=0;$dupes=0
+  $usage=@{};$tasks=@{};$compact=@{};$sn=0;$dupes=0;$supplementalRequests=0;[long]$supplementalTokens=0
+  $coveredUsageStates=@{};$seenResponses=@{}
+  foreach($event in ($allEvents|Where-Object {$_.k -eq 'token_count'})){
+    # A known different response is never interchangeable with a new response,
+    # even when a cumulative reset reproduces its old numeric state.
+    if(-not $event.provenResponse){
+      $state=UsageState $event
+      if(-not $coveredUsageStates.ContainsKey($state)){$coveredUsageStates[$state]=[Collections.Generic.List[object]]::new()}
+      $coveredUsageStates[$state].Add($event)
+    }
+  }
   foreach($g in ($allEvents|Where-Object {$_.k -ne 'skill_read'}|Group-Object s)){
-    $sn++;$mo='unknown';$ef='unknown';$pt='';$pl=''
+    $sn++;$pt='';$pl=''
     foreach($e in ($g.Group|Sort-Object a,i)){
-      if($e.k -eq 'thread_settings_applied'){if($e.mo){$mo=$e.mo};if($e.ef){$ef=$e.ef};continue}
+      if($e.k -eq 'thread_settings_applied'){continue}
+      $mo=$e.mo;$ef=$e.ef;$scope=$e.sc
       $at=ParseTimestamp $e.a
-      if($e.k -eq 'token_count'){
-        $tk=(@($e.t)-join '|');$lk=(@($e.l)-join '|')
-        if($tk -eq $pt -and $lk -eq $pl){$dupes++;continue}
-        $pt=$tk;$pl=$lk;$inp=[int64]$e.l[0];$ca=[int64]$e.l[1];$ou=[int64]$e.l[2]
+      if($e.k -in 'token_count','token_usage_record'){
+        if($e.k -eq 'token_usage_record'){
+          # Response IDs are globally unique. A matched copy covers all duplicates.
+          if([int64]$e.l[0]+[int64]$e.l[2] -le 0){continue}
+          if($seenResponses.ContainsKey([string]$e.r)){continue};$seenResponses[[string]$e.r]=$true
+          if($matchedResponses.ContainsKey([string]$e.r)){continue}
+          $legacyCovered=$false
+          foreach($candidate in $coveredUsageStates[(UsageState $e)]){
+            # In the observed schema the request record precedes its consumption
+            # event. A state from an earlier turn/reset cannot cover this request.
+            if((ParseTimestamp $candidate.a) -ge $at -and (-not (T $e turn) -or -not (T $candidate turn) -or (T $e turn) -eq (T $candidate turn))){$legacyCovered=$true;break}
+          }
+          if($legacyCovered){continue}
+        }else{
+          $tk=(@($e.t)-join '|');$lk=(@($e.l)-join '|')
+          if($tk -eq $pt -and $lk -eq $pl){$dupes++;continue}
+          $pt=$tk;$pl=$lk
+        }
+        $inp=[int64]$e.l[0];$ca=[int64]$e.l[1];$ou=[int64]$e.l[2]
         if($inp+$ou -le 0){continue}
-        $key=(Day $at)+'|'+$mo+'|'+$ef+'|'+$sn
-        if(!$usage.ContainsKey($key)){$usage[$key]=[ordered]@{date=(Day $at);model=$mo;effort=$ef;input=0;cached=0;fresh=0;output=0;reasoning=0;total=0;session=$sn}}
+        if($e.k -eq 'token_usage_record'){$supplementalRequests++;$supplementalTokens+=$inp+$ou}
+        $key=(Day $at)+'|'+$mo+'|'+$ef+'|'+$scope+'|'+$sn
+        if(!$usage.ContainsKey($key)){$usage[$key]=[ordered]@{date=(Day $at);model=$mo;effort=$ef;scope=$scope;input=0;cached=0;fresh=0;output=0;reasoning=0;total=0;session=$sn}}
         $z=$usage[$key];$z.input+=$inp;$z.cached+=$ca;$z.fresh+=[Math]::Max(0,$inp-$ca);$z.output+=$ou;$z.reasoning+=[int64]$e.l[3];$z.total+=$inp+$ou
+        if($e.turn){
+          $taskKey=[string]$e.s+'|'+[string]$e.turn
+          if($tasks.ContainsKey($taskKey)){
+            $task=$tasks[$taskKey]
+            if($task.model -eq 'unknown' -and $mo -ne 'unknown'){$task.model=$mo}
+            if($task.effort -eq 'unknown' -and $ef -ne 'unknown'){$task.effort=$ef}
+          }
+        }
       } elseif($e.k -in 'task_started','task_complete') {
         $key=[string]$e.s+'|'+[string]$e.turn
-        if(!$tasks.ContainsKey($key)){$tasks[$key]=[ordered]@{date=(Day $at);startedDate=$null;model=$mo;effort=$ef;session=$sn;started=$false;completed=$false;duration=$null;ttfb=$null;error=$false}}
+        if(!$tasks.ContainsKey($key)){$tasks[$key]=[ordered]@{date=(Day $at);startedDate=$null;model=$mo;effort=$ef;scope=$scope;session=$sn;started=$false;completed=$false;duration=$null;ttfb=$null;error=$false}}
         $z=$tasks[$key]
+        if($mo -ne 'unknown'){$z.model=$mo};if($ef -ne 'unknown'){$z.effort=$ef}
         if($e.k -eq 'task_started'){
           $z.started=$true
           if(-not $z.startedDate){$z.startedDate=Day $at}
         }else{$z.completed=$true;$z.duration=$e.du;if($e.hf){$z.ttfb=$e.ft};$z.error=$e.er;$z.date=Day $at}
       } elseif($e.k -in 'compacted','context_compacted') {
         $key=[string]$e.s+'|'+[string]$e.w+'|'+$at.ToUnixTimeSeconds()
-        if(!$compact.ContainsKey($key)){$compact[$key]=[ordered]@{date=(Day $at);model=$mo;effort=$ef;session=$sn}}
+        if(!$compact.ContainsKey($key)){$compact[$key]=[ordered]@{date=(Day $at);model=$mo;effort=$ef;scope=$scope;session=$sn}}
       }
     }
   }
@@ -593,7 +712,7 @@ try {
   $skills.inventoryScope='known_local_skill_roots';$skills.inventory=$metadata.inventory
   $month=([DateTimeOffset]::UtcNow.ToOffset($tz)).ToString('yyyy-MM')
   $now=([DateTimeOffset]::UtcNow.ToOffset($tz)).ToString('yyyy-MM-dd HH:mm')
-  $data=[ordered]@{schema=2;skills=$skills;generated=$now;month=$month;usage=@($usage.Values);tasks=@($tasks.Values);compactions=@($compact.Values);duplicates=$dupes;refresh=[ordered]@{files=$files.Count;reused=$reused;reparsed=$reparsed;migrated=$migrated;sourceBytes=$sourceBytes;sourceBytesRead=$sourceBytesRead;cacheBytesRead=$cacheBytesRead;cacheBytes=$cacheBytes;elapsedMs=$generationTimer.ElapsedMilliseconds;skillMetadata=$metadata.cost}}
+  $data=[ordered]@{schema=2;usageScopeSchema=1;skills=$skills;generated=$now;month=$month;usage=@($usage.Values);tasks=@($tasks.Values);compactions=@($compact.Values);duplicates=$dupes;refresh=[ordered]@{files=$files.Count;reused=$reused;reparsed=$reparsed;migrated=$migrated;sourceBytes=$sourceBytes;sourceBytesRead=$sourceBytesRead;cacheBytesRead=$cacheBytesRead;cacheBytes=$cacheBytes;elapsedMs=$generationTimer.ElapsedMilliseconds;skillMetadata=$metadata.cost;supplementalTokenRequests=$supplementalRequests;supplementalTokens=$supplementalTokens}}
   $dataJson=$data|ConvertTo-Json -Depth 10 -Compress
 
   $webRoot=Join-Path $PSScriptRoot 'web'

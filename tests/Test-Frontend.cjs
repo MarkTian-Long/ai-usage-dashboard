@@ -56,6 +56,26 @@ const activityFixture = () => {
       readTurns30: row.skill === 'alpha' ? 2 : 1, tasks30: row.skill === 'alpha' ? 2 : 1 }));
   return data;
 };
+const scopedFixture = () => ({
+  ...fixture(), schema: 2, usageScopeSchema: 1, skills: activityFixture().skills,
+  usage: [
+    { date: '2026-09-07', session: 11, scope: 'task', model: 'a', effort: 'high', total: 100, input: 80, cached: 30, fresh: 50, output: 20, reasoning: 10 },
+    { date: '2026-09-07', session: 12, scope: 'task', model: 'b', effort: 'medium', total: 50, input: 40, cached: 35, fresh: 5, output: 10, reasoning: 5 },
+    { date: '2026-09-07', session: 13, scope: 'auto_review', model: 'codex-auto-review', effort: 'low', total: 900, input: 890, cached: 880, fresh: 10, output: 10, reasoning: 5 },
+    // Guardian classification is independent of its model label.
+    { date: '2026-09-07', session: 14, scope: 'auto_review', model: 'a', effort: 'low', total: 100, input: 80, cached: 30, fresh: 50, output: 20, reasoning: 10 }
+  ],
+  tasks: [
+    { date: '2026-09-07', session: 11, scope: 'task', model: 'a', effort: 'high', started: true, completed: true, duration: 20, ttfb: 1 },
+    { date: '2026-09-07', session: 12, scope: 'task', model: 'b', effort: 'medium', started: true, completed: true, duration: 5, ttfb: 1 },
+    { date: '2026-09-07', session: 13, scope: 'auto_review', model: 'codex-auto-review', effort: 'low', started: true, completed: true, duration: 2, ttfb: 1 },
+    { date: '2026-09-07', session: 14, scope: 'auto_review', model: 'a', effort: 'low', started: true, completed: true, duration: 1, ttfb: 0 }
+  ],
+  compactions: [
+    { date: '2026-09-07', session: 11, scope: 'task', model: 'a', effort: 'high' },
+    { date: '2026-09-07', session: 13, scope: 'auto_review', model: 'codex-auto-review', effort: 'low' }
+  ]
+});
 const metadataFixture = () => {
   const data = activityFixture();
   data.skills.metadataSchema = 1;
@@ -136,8 +156,66 @@ async function test(name, action) { await action(); console.log('PASS ' + name);
 (async () => {
   await test('missing timing samples are excluded while genuine zero remains', () => {
     const h = harness();
-    assert.equal(h.run('JSON.stringify(samples([{ttfb:null},{},{ttfb:""},{ttfb:0},{ttfb:5},{ttfb:-1},{ttfb:"bad"}], "ttfb"))'), '[0,5]');
+    assert.equal(h.run('JSON.stringify(samples([{ttfb:null},{},{ttfb:""},{ttfb:0},{ttfb:5},{ttfb:-1},{ttfb:"bad"},{ttfb:false},{ttfb:true},{ttfb:"0"},{ttfb:"5"}], "ttfb"))'), '[0,5]');
     assert.equal(h.run('Q(samples([{duration:null}], "duration"), .5)'), null);
+  });
+  await test('malformed core snapshots are rejected by loadData without replacing charts, dimensions or the prior version', async () => {
+    const h = harness(); let data = scopedFixture(), version = 'valid';
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : data));
+    await h.run('loadData()');
+    h.elements.get('#usageScope').value = 'auto_review'; h.run('changeUsageScope()');
+    h.elements.get('#start').value = '2026-09-01'; h.elements.get('#end').value = '2026-09-28';
+    h.elements.get('#usagePreset').value = 'custom'; h.elements.get('#model').value = 'a'; h.elements.get('#effort').value = 'low';
+    h.elements.get('#metric').value = 'output'; h.run('selectPage("eff"); saveView(); render()');
+    const priorData = h.run('JSON.stringify(D)'), priorView = h.run('JSON.stringify(viewMemory)');
+    const priorCharts = ['#tokenCards', '#effCards', '#models', '#status', '#tokenTrend', '#taskTrend'].map(id => h.elements.get(id).innerHTML);
+    const mutations = [
+      d => { d.usage[0] = []; }, d => { d.usage[0].date = '2026-02-30'; }, d => { d.usage[0].date = 20260907; },
+      d => { d.usage[0].session = '11'; }, d => { d.usage[0].session = 0; }, d => { d.usage[0].session = false; },
+      d => { d.usage[0].model = false; }, d => { d.usage[0].effort = ' '; },
+      d => { d.usage[0].total = 'bad'; }, d => { d.usage[0].total = true; }, d => { d.usage[0].input = 80.5; },
+      d => { d.usage[0].output = -1; }, d => { d.usage[0].cached = 81; }, d => { d.usage[0].fresh = 51; },
+      d => { d.usage[0].reasoning = 21; }, d => { d.usage[0].total = 101; }, d => { d.usage[0].input = Number.MAX_SAFE_INTEGER + 1; },
+      d => { d.usage[0].total = Infinity; }, d => { d.usage[0].output = NaN; },
+      d => { d.tasks[0].date = '2026-13-01'; }, d => { d.tasks[0].startedDate = '2026-02-30'; },
+      d => { d.tasks[0].session = '11'; }, d => { d.tasks[0].started = false; d.tasks[0].completed = false; },
+      d => { d.tasks[0].started = 'true'; }, d => { d.tasks[0].completed = 1; }, d => { delete d.tasks[0].completed; },
+      d => { d.tasks[0].duration = false; }, d => { d.tasks[0].duration = '20'; }, d => { d.tasks[0].duration = -1; },
+      d => { d.tasks[0].duration = Infinity; }, d => { d.tasks[0].ttfb = true; }, d => { d.tasks[0].ttfb = ''; },
+      d => { d.tasks[0].error = 'false'; }, d => { d.tasks[0].completed = false; d.tasks[0].error = true; },
+      d => { d.compactions[0].date = '2026-00-01'; }, d => { d.compactions[0].session = null; },
+      d => { d.compactions[0].model = {}; }, d => { d.compactions[0].effort = 1; }
+    ];
+    version = 'bad';
+    for (const mutate of mutations) {
+      data = scopedFixture(); mutate(data);
+      await assert.rejects(h.run('loadData()'), /数据格式无效/);
+      assert.equal(h.run('JSON.stringify(D)'), priorData); assert.equal(h.run('lastUpdated'), 'valid');
+      assert.equal(h.run('JSON.stringify(viewMemory)'), priorView);
+      assert.deepEqual(['#tokenCards', '#effCards', '#models', '#status', '#tokenTrend', '#taskTrend'].map(id => h.elements.get(id).innerHTML), priorCharts);
+      assert.equal(h.elements.get('#usageScope').value, 'auto_review'); assert.equal(h.elements.get('#model').value, 'a');
+      assert.equal(h.elements.get('#effort').value, 'low'); assert.equal(h.elements.get('#metric').value, 'output');
+      assert.equal(h.run('loadBusy'), false);
+    }
+    await h.run('autoRefresh()');
+    assert.match(h.elements.get('#state').textContent, /自动更新失败.*保留已加载数据/);
+    assert.equal(h.run('lastUpdated'), 'valid');
+    const empty = harness(); empty.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'bad' } : data));
+    await assert.rejects(empty.run('loadData()'), /数据格式无效/);
+    assert.equal(empty.run('D.usage.length'), 0); assert.equal(empty.run('lastUpdated'), '');
+  });
+  await test('strict core validation retains legitimate zero, missing timing, completed-only requests and legacy snapshots', async () => {
+    const h = harness(), data = fixture();
+    data.usage.push({ ...data.usage[0], session: 3, total: 0, input: 0, cached: 0, fresh: 0, output: 0, reasoning: 0 });
+    data.tasks.push({ date: '2026-08-20', session: 3, model: 'unknown', effort: 'unknown', started: false, completed: true, startedDate: null, duration: 0, ttfb: 0, error: false });
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'valid' } : data));
+    await h.run('loadData()');
+    assert.equal(h.run('lastUpdated'), 'valid'); assert.equal(h.elements.get('#usageScope').value, 'all');
+    assert.equal(h.run('JSON.stringify(samples(D.tasks, "duration"))'), '[20,0]');
+    assert.equal(h.run('JSON.stringify(samples(D.tasks, "ttfb"))'), '[0,0]');
+    assert.equal(h.run('D.tasks.filter(task => task.completed).length + D.tasks.filter(task => task.started && !task.completed).length'), data.tasks.length);
+    h.data(scopedFixture()); h.run('synthetic.usage[0].scope = "auto_review"; validateData(synthetic)');
+    assert.equal(h.run('synthetic.usage[0].scope'), 'auto_review', 'scope belongs to each record, and must not be inferred from model names or other rows');
   });
   await test('all dates include task-only days and default range stays in current month', () => {
     const h = harness(); h.data(fixture());
@@ -150,6 +228,54 @@ async function test(name, action) { await action(); console.log('PASS ' + name);
     assert.equal(h.run('JSON.stringify(daily(synthetic.tasks, () => 1, taskDate))'), '[["2026-08-20",3],["2026-09-07",1]]');
     h.run('chart([{date:"2026-08-20",n:0}], "#taskTrend", row => row.n)');
     assert.match(h.elements.get('#taskTrend').innerHTML, /height:0%/);
+  });
+  await test('Token and request trends preserve selected calendar gaps and distinguish recorded zero from absent records', async () => {
+    const data = fixture(); data.generated = '2026-10-13 12:00';
+    data.usage = [{ ...data.usage[0], date: '2026-10-01', input: 100, total: 100, cached: 40, fresh: 60, output: 0, reasoning: 0 },
+      { ...data.usage[1], date: '2026-10-13' }];
+    data.tasks = [{ ...data.tasks[0], startedDate: '2026-10-01', date: '2026-10-02' },
+      { ...data.tasks[3], startedDate: '2026-10-13', date: '2026-10-13' }];
+    const h = harness({ session: JSON.stringify({ rangePreset: 'custom', start: '2026-10-01', end: '2026-10-13', metric: 'output' }) });
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : data));
+    await h.run('loadData()');
+    for (const id of ['#tokenTrend', '#taskTrend']) {
+      assert.equal((h.elements.get(id).innerHTML.match(/data-date=/g) || []).length, 13);
+      assert.equal((h.elements.get(id).innerHTML.match(/data-observed="false"/g) || []).length, 11);
+      assert.match(h.elements.get(id).innerHTML, /2026-10-02 · 无可观测记录/);
+      assert.equal(h.elements.get(id).classList.contains('usage-sparse'), false);
+    }
+    assert.match(h.elements.get('#tokenTrend').innerHTML, /usage-day-zero[^>]*data-date="2026-10-01"[^>]*data-observed="true"/);
+    assert.match(h.elements.get('#tokenTrend').innerHTML, /2026-10-01 · 0 Token（有记录）/);
+    assert.match(h.elements.get('#taskTrend').innerHTML, /2026-10-01 · 1 次请求/);
+    assert.equal(h.elements.get('#first').textContent, '2026-10-01'); assert.equal(h.elements.get('#last').textContent, '2026-10-13');
+    assert.equal(h.elements.get('#taskFirst').textContent, '2026-10-01'); assert.equal(h.elements.get('#taskLast').textContent, '2026-10-13');
+    assert.equal(h.run('totals(filter(U)).days'), 2); assert.equal(h.run('totals(filter(U)).total / totals(filter(U)).days'), 60);
+    assert.match(h.elements.get('#tokenCards').innerHTML, /活跃日日均/);
+    assert.match(h.elements.get('#tokenTrendNote').textContent, /不等于实际用量为零/);
+    // A synthetic display sample retains its exact value while the tooltip is compact.
+    assert.equal(h.run('const precisionRows = [{date:"2026-10-01",total:123456789}]; chart(precisionRows,"#tokenTrend",row=>row.total); precisionRows[0].total'), 123456789);
+    assert.match(h.elements.get('#tokenTrend').innerHTML, /data-tip="2026-10-01 · 123\.5M Token"/);
+    assert.doesNotMatch(h.elements.get('#tokenTrend').innerHTML, /123,456,789/);
+    h.elements.get('#model').value = 'missing'; h.run('render()');
+    assert.equal((h.elements.get('#tokenTrend').innerHTML.match(/data-observed="false"/g) || []).length, 13);
+    assert.match(h.elements.get('#tokenTrendNote').textContent, /当前筛选没有可观测记录/);
+  });
+  await test('very long Token and request ranges use actual calendar positions without expanding absent days into DOM nodes', async () => {
+    const h = harness({ session: JSON.stringify({ rangePreset: 'custom', start: '0001-01-01', end: '2026-09-28' }) });
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : fixture()));
+    await h.run('loadData()');
+    for (const id of ['#tokenTrend', '#taskTrend']) {
+      assert.equal((h.elements.get(id).innerHTML.match(/data-date=/g) || []).length, 2);
+      assert.equal(h.elements.get(id).classList.contains('usage-sparse'), true);
+      assert.match(h.elements.get(id).innerHTML, /style="left:/);
+    }
+    assert.equal(h.elements.get('#first').textContent, '0001-01-01'); assert.equal(h.elements.get('#last').textContent, '2026-09-28');
+    assert.match(h.elements.get('#tokenTrendNote').textContent, /跨度超过一年/);
+    h.run('q("#start").value = "2026-08-01"; q("#end").value = "2026-08-31"; render()');
+    assert.equal(h.elements.get('#tokenTrend').classList.contains('usage-sparse'), false);
+    assert.equal((h.elements.get('#tokenTrend').innerHTML.match(/data-date=/g) || []).length, 31);
+    assert.equal(h.run('calendarTrend([], "2024-01-01", "2024-12-31").points.length'), 366);
+    assert.equal(h.run('calendarTrend([], "2023-12-31", "2024-12-31").points.length'), 0);
   });
   await test('historic range survives reload and auto-update with corrupt local preferences', async () => {
     const h = harness({ session: JSON.stringify({ start: '2026-08-01', end: '2026-08-31', page: 'eff' }) });
@@ -231,6 +357,178 @@ async function test(name, action) { await action(); console.log('PASS ' + name);
     h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: ++statusReads === 1 ? 'v1' : 'v2' } : fixture()));
     await assert.rejects(h.run('loadData()'), /版本变化/);
     assert.equal(h.run('D.usage.length'), 0); assert.equal(h.run('lastUpdated'), '');
+  });
+  await test('task view separates large guardian totals while ordinary subagents remain included', async () => {
+    const h = harness();
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'scoped-v1' } : scopedFixture()));
+    await h.run('loadData()');
+    assert.equal(h.elements.get('#usageScope').value, 'task');
+    assert.equal(h.elements.get('#usageScope').disabled, false);
+    assert.equal(h.run('totals(filter(U)).total'), 150);
+    assert.equal(h.run('totals(filter(U)).sessions'), 2);
+    assert.equal(h.run('filter(D.tasks, taskDate).length'), 2);
+    assert.equal(h.run('filter(D.compactions).length'), 1);
+    assert.match(h.elements.get('#models').innerHTML, /66\.7%/);
+    assert.match(h.elements.get('#models').innerHTML, /33\.3%/);
+    assert.doesNotMatch(h.elements.get('#models').innerHTML, /codex-auto-review/);
+    assert.doesNotMatch(h.elements.get('#efforts').innerHTML, />low</);
+    assert.match(h.elements.get('#usageScopeNote').textContent, /任务用量（含子代理）.*原始 Token.*不代表官方套餐额度/);
+    h.elements.get('#usageScope').value = 'auto_review'; h.run('changeUsageScope()');
+    assert.equal(h.run('totals(filter(U)).total'), 1000);
+    assert.equal(h.run('filter(D.tasks, taskDate).length'), 2);
+    assert.equal(h.run('filter(D.compactions).length'), 1);
+    assert.match(h.elements.get('#models').innerHTML, /codex-auto-review/);
+    assert.match(h.elements.get('#models').innerHTML, /90\.0%/);
+    assert.match(h.elements.get('#usageScopeNote').textContent, /当前统计：自动安全审查/);
+    h.elements.get('#usageScope').value = 'all'; h.run('changeUsageScope()');
+    assert.equal(h.run('totals(filter(U)).total'), 1150);
+    assert.equal(h.run('filter(D.tasks, taskDate).length'), 4);
+    assert.equal(h.run('filter(D.compactions).length'), 2);
+    assert.equal(h.run('totals(D.usage).total'), 1150, 'view changes never discard raw totals');
+  });
+  await test('scope change reconciles unavailable dimensions, preserves custom dates and leaves Skill scope independent', async () => {
+    const h = harness();
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : scopedFixture()));
+    h.run('initialize()'); await flush();
+    const skillBefore = h.run('JSON.stringify({...skillAuditSnapshot(), exportedAt:null})');
+    h.elements.get('#usagePreset').value = 'custom';
+    h.elements.get('#start').value = h.elements.get('#end').value = '2026-09-07';
+    h.elements.get('#model').value = 'b'; h.elements.get('#effort').value = 'medium';
+    h.elements.get('#metric').value = 'cached'; h.run('selectPage("eff"); saveView(); render()');
+    h.elements.get('#usageScope').value = 'auto_review'; h.elements.get('#usageScope').onchange();
+    assert.equal(h.elements.get('#model').value, ''); assert.equal(h.elements.get('#effort').value, '');
+    assert.doesNotMatch(h.elements.get('#model').innerHTML, /value="b"/);
+    assert.doesNotMatch(h.elements.get('#effort').innerHTML, /value="medium"/);
+    assert.equal(h.elements.get('#start').value, '2026-09-07'); assert.equal(h.elements.get('#end').value, '2026-09-07');
+    assert.equal(h.elements.get('#usagePreset').value, 'custom'); assert.equal(h.elements.get('#metric').value, 'cached');
+    assert.equal(h.tabs.find(tab => tab.dataset.page === 'eff').getAttribute('aria-selected'), 'true');
+    assert.equal(h.run('filter(D.tasks, taskDate).length'), 2);
+    assert.equal(h.run('JSON.stringify({...skillAuditSnapshot(), exportedAt:null})'), skillBefore);
+    assert.equal(h.run('JSON.parse(window.sessionStorage.getItem(VIEW_KEY)).usageScope'), 'auto_review');
+    // A label shared by task and guardian threads remains valid when switching scope.
+    h.elements.get('#model').value = 'a'; h.elements.get('#effort').value = 'low';
+    h.elements.get('#usageScope').value = 'task'; h.elements.get('#usageScope').onchange();
+    assert.equal(h.elements.get('#model').value, 'a'); assert.equal(h.elements.get('#effort').value, '');
+    assert.equal(h.run('totals(filter(U)).total'), 100);
+  });
+  await test('scoped view survives reload, automatic update and manual refresh; reset restores task defaults only', async () => {
+    const saved = { rangePreset: 'custom', usageScope: 'auto_review', start: '2026-09-01', end: '2026-09-28',
+      model: 'codex-auto-review', effort: 'low', metric: 'cached', page: 'eff', skills: { preset: 'days7', search: 'alpha' } };
+    const h = harness({ session: JSON.stringify(saved) }); let version = 'v1';
+    h.api((url, options) => {
+      if (options?.method === 'POST') { version = 'v3'; return reply({}); }
+      return reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : scopedFixture());
+    });
+    h.run('initialize()'); await flush(); h.run('saveView()');
+    assert.equal(h.run('totals(filter(U)).total'), 900);
+    const skillBefore = h.run('JSON.stringify(skillView)');
+    version = 'v2'; await h.run('autoRefresh()'); await h.run('manualRefresh()');
+    assert.equal(h.run('lastUpdated'), 'v3'); assert.equal(h.elements.get('#state').textContent, '刷新完成');
+    for (const [id, expected] of [['usageScope', 'auto_review'], ['model', 'codex-auto-review'], ['effort', 'low'], ['metric', 'cached'], ['start', '2026-09-01'], ['end', '2026-09-28']]) {
+      assert.equal(h.elements.get('#' + id).value, expected, id);
+    }
+    h.tabs.find(tab => tab.dataset.page === 'skill').onclick(); h.tabs.find(tab => tab.dataset.page === 'eff').onclick();
+    const reload = harness({ session: h.run('window.sessionStorage.getItem(VIEW_KEY)') });
+    reload.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v3' } : scopedFixture()));
+    await reload.run('loadData()');
+    assert.equal(reload.elements.get('#usageScope').value, 'auto_review'); assert.equal(reload.run('totals(filter(U)).total'), 900);
+    h.elements.get('#reset').onclick();
+    assert.equal(h.elements.get('#usageScope').value, 'task'); assert.equal(h.elements.get('#usagePreset').value, 'month');
+    assert.equal(h.elements.get('#start').value, '2026-09-01'); assert.equal(h.elements.get('#end').value, '2026-09-28');
+    assert.equal(h.elements.get('#model').value, ''); assert.equal(h.elements.get('#effort').value, '');
+    assert.equal(h.elements.get('#metric').value, 'total'); assert.equal(h.run('totals(filter(U)).total'), 150);
+    assert.equal(h.run('JSON.stringify(skillView)'), skillBefore);
+    assert.equal(h.run('JSON.parse(window.sessionStorage.getItem(VIEW_KEY)).usageScope'), 'task');
+  });
+  await test('scope changes clear a stale effort even when model and effort separately exist in the new scope', async () => {
+    const h = harness(), data = scopedFixture();
+    data.usage[2].effort = data.tasks[2].effort = data.compactions[1].effort = 'high';
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : data));
+    await h.run('loadData()');
+    h.elements.get('#model').value = 'a'; h.elements.get('#effort').value = 'high';
+    h.elements.get('#usageScope').value = 'auto_review'; h.run('changeUsageScope()');
+    assert.match(h.elements.get('#effort').innerHTML, /value="high"/);
+    assert.equal(h.elements.get('#model').value, 'a'); assert.equal(h.elements.get('#effort').value, '');
+    assert.equal(h.run('totals(filter(U)).total'), 100, 'scope migration must not retain an unavailable model-effort combination');
+  });
+  await test('ordinary model changes clear unsupported efforts while preserving valid combinations, dates, page and Skill filters', async () => {
+    const h = harness(), data = scopedFixture(); let version = 'v1';
+    data.usage.push({ ...data.usage[1], session: 15, model: 'c' });
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : data));
+    h.run('initialize()'); await flush();
+    h.elements.get('#usagePreset').value = 'custom'; h.elements.get('#start').value = h.elements.get('#end').value = '2026-09-07';
+    h.elements.get('#model').value = 'a'; h.elements.get('#effort').value = 'high'; h.elements.get('#metric').value = 'cached';
+    h.run('selectPage("eff"); restoreSkillView({preset:"days7",search:"alpha"}); saveView(); render()');
+    const skills = h.run('JSON.stringify(skillView)');
+    h.elements.get('#model').value = 'b'; h.elements.get('#model').onchange();
+    assert.equal(h.elements.get('#model').value, 'b'); assert.equal(h.elements.get('#effort').value, '');
+    assert.equal(h.run('totals(filter(U)).total'), 50, 'unsupported model-effort combinations must not turn a real model total into zero');
+    h.elements.get('#effort').value = 'medium'; h.elements.get('#effort').onchange();
+    h.elements.get('#model').value = 'c'; h.elements.get('#model').onchange();
+    assert.equal(h.elements.get('#effort').value, 'medium'); assert.equal(h.run('totals(filter(U)).total'), 50);
+    version = 'v2'; await h.run('autoRefresh()');
+    assert.equal(h.elements.get('#model').value, 'c'); assert.equal(h.elements.get('#effort').value, 'medium');
+    assert.equal(h.elements.get('#start').value, '2026-09-07'); assert.equal(h.elements.get('#end').value, '2026-09-07');
+    assert.equal(h.elements.get('#metric').value, 'cached'); assert.equal(h.elements.get('#usagePreset').value, 'custom');
+    assert.equal(h.tabs.find(tab => tab.dataset.page === 'eff').getAttribute('aria-selected'), 'true');
+    assert.equal(h.run('JSON.stringify(skillView)'), skills);
+    h.elements.get('#model').value = ''; h.elements.get('#model').onchange();
+    assert.equal(h.elements.get('#effort').value, 'medium'); assert.equal(h.run('totals(filter(U)).total'), 100);
+  });
+  await test('scope and date presets advance with new snapshots while storage is unavailable', async () => {
+    const h = harness({ storageThrows: true }); let data = scopedFixture(), version = 'v1';
+    data.usage.push({ ...data.usage[2], date: '2026-08-01', total: 10, input: 9, cached: 8, fresh: 1, output: 1, reasoning: 0 });
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : data));
+    await h.run('loadData()');
+    h.elements.get('#usageScope').value = 'auto_review'; h.elements.get('#usagePreset').value = 'all'; h.run('changeUsageScope()');
+    assert.equal(h.elements.get('#start').value, '2026-08-01');
+    data.generated = '2026-10-01 12:00'; data.skills.asOf = '2026-10-01';
+    data.skills.windows = { days7: { start: '2026-09-25', end: '2026-10-01' }, days30: { start: '2026-09-02', end: '2026-10-01' } };
+    version = 'v2'; await h.run('autoRefresh()');
+    assert.equal(h.elements.get('#usageScope').value, 'auto_review'); assert.equal(h.elements.get('#start').value, '2026-08-01');
+    assert.equal(h.elements.get('#end').value, '2026-10-01');
+    h.elements.get('#usageScope').value = 'task'; h.run('changeUsageScope()');
+    assert.equal(h.elements.get('#start').value, '2026-09-07', 'all-history begins at the selected scope\'s first observation');
+  });
+  await test('legacy snapshots expose all-only totals and restore the saved scope when a new snapshot arrives', async () => {
+    const h = harness({ session: JSON.stringify({ usageScope: 'auto_review', rangePreset: 'all' }) }); let data = fixture(), version = 'old';
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : data));
+    await h.run('loadData()');
+    assert.equal(h.elements.get('#usageScope').value, 'all'); assert.equal(h.elements.get('#usageScope').disabled, true);
+    assert.equal(h.run('totals(filter(U)).total'), 120);
+    assert.match(h.elements.get('#usageScopeNote').textContent, /旧快照未区分.*全部 Token.*模型归属未按新口径核验/);
+    h.run('saveView()');
+    data = scopedFixture(); version = 'new'; await h.run('autoRefresh()');
+    assert.equal(h.elements.get('#usageScope').disabled, false); assert.equal(h.elements.get('#usageScope').value, 'auto_review');
+    assert.equal(h.run('totals(filter(U)).total'), 1000);
+    assert.doesNotMatch(h.elements.get('#usageScopeNote').textContent, /旧快照/);
+    const noPreference = harness({ session: JSON.stringify({ rangePreset: 'month', model: 'codex-auto-review', effort: 'low' }) });
+    noPreference.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'new' } : scopedFixture()));
+    await noPreference.run('loadData()');
+    assert.equal(noPreference.elements.get('#usageScope').value, 'task');
+    assert.equal(noPreference.elements.get('#model').value, ''); assert.equal(noPreference.elements.get('#effort').value, '');
+  });
+  await test('malformed scope metadata preserves the valid snapshot, scope selection and rendered shares', async () => {
+    const h = harness(); let data = scopedFixture(), version = 'v1';
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : data));
+    await h.run('loadData()'); h.elements.get('#usageScope').value = 'auto_review'; h.run('changeUsageScope()');
+    const prior = h.elements.get('#models').innerHTML, notice = h.elements.get('#usageScopeNote').textContent;
+    const mutations = [
+      d => { d.usageScopeSchema = null; }, d => { d.usageScopeSchema = '1'; }, d => { d.usageScopeSchema = 2; },
+      d => { delete d.usage[0].scope; }, d => { d.usage[0].scope = 'all'; }, d => { d.usage[0] = null; },
+      d => { d.tasks[0].scope = 'guardian'; }, d => { delete d.tasks[0].scope; }, d => { d.compactions[0].scope = ''; }
+    ];
+    version = 'v2';
+    for (const mutate of mutations) {
+      data = scopedFixture(); mutate(data);
+      await assert.rejects(h.run('loadData()'), /Token 统计范围数据格式无效/);
+      assert.equal(h.run('lastUpdated'), 'v1'); assert.equal(h.run('totals(D.usage).total'), 1150);
+      assert.equal(h.elements.get('#usageScope').value, 'auto_review');
+      assert.equal(h.elements.get('#models').innerHTML, prior); assert.equal(h.elements.get('#usageScopeNote').textContent, notice);
+    }
+    await h.run('autoRefresh()');
+    assert.match(h.elements.get('#state').textContent, /自动更新失败.*Token 统计范围数据格式无效.*保留已加载数据/);
+    assert.equal(h.run('lastUpdated'), 'v1'); assert.equal(h.elements.get('#models').innerHTML, prior);
   });
   await test('Skill reads render both fixed windows, source labels and escaped names', async () => {
     const h = harness();
@@ -503,6 +801,17 @@ async function test(name, action) { await action(); console.log('PASS ' + name);
     await h.run('loadData()');
     assert.match(h.elements.get('#cacheInfo').textContent, /本次重解析文件体积 1.0 MiB（按文件大小估算）/);
     assert.match(h.elements.get('#cacheInfo').textContent, /汇总阶段耗时 12.5 秒/);
+  });
+  await test('supplemental Token accounting is disclosed only when valid counts are available', async () => {
+    const h = harness(); let data = fixture();
+    data.refresh.supplementalTokenRequests = 3; data.refresh.supplementalTokens = 2468102;
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : data));
+    await h.run('loadData()');
+    assert.match(h.elements.get('#cacheInfo').textContent, /已补计 3 条逐请求记录（2\.5M Token，已按响应去重）/);
+    assert.match(html, /逐请求记录只补计缺少对应统计事件的请求，并按响应去重/);
+    data = fixture(); await h.run('loadData()'); assert.doesNotMatch(h.elements.get('#cacheInfo').textContent, /已补计/);
+    data.refresh.supplementalTokenRequests = '3'; data.refresh.supplementalTokens = 2468102;
+    await h.run('loadData()'); assert.doesNotMatch(h.elements.get('#cacheInfo').textContent, /已补计/);
   });
   await test('Skill trend has integer quantity ticks, visible values and zero-day readouts for pointer, focus and date controls', async () => {
     const h = harness();

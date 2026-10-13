@@ -230,6 +230,133 @@ function noIdentifiers(value) {
     }));
     assert.equal(panels.length, 3); assert.ok(panels.every(box => Math.abs(box.y - panels[0].y) < 2));
     assert.ok(panels[1].x > panels[0].x && panels[2].x > panels[1].x); record('Desktop Token panels retain their original layout');
+    const calendarStart = await page.locator('#start').inputValue(), calendarEnd = await page.locator('#end').inputValue();
+    const calendarDays = Math.round((Date.parse(calendarEnd + 'T00:00:00Z') - Date.parse(calendarStart + 'T00:00:00Z')) / dayMs) + 1;
+    assert.ok(calendarDays > 0 && calendarDays <= 366);
+    assert.equal(await page.locator('#tokenTrend .usage-day').count(), calendarDays);
+    assert.equal(await page.locator('#first').innerText(), calendarStart);
+    assert.equal(await page.locator('#last').innerText(), calendarEnd);
+    const absentTokenDay = page.locator('#tokenTrend .usage-day-missing').first();
+    if (await absentTokenDay.count()) { await absentTokenDay.focus(); assert.match(await absentTokenDay.getAttribute('aria-label'), /无可观测记录/); }
+    await page.locator('[data-page="eff"]').click();
+    assert.equal(await page.locator('#taskTrend .usage-day').count(), calendarDays);
+    assert.equal(await page.locator('#taskFirst').innerText(), calendarStart);
+    assert.equal(await page.locator('#taskLast').innerText(), calendarEnd);
+    await page.locator('[data-page="token"]').click();
+    record('Token and request trends preserve the selected calendar with explicit absent-record labels');
+    if (synthetic) {
+      const scoped = fixture(); scoped.usageScopeSchema = 1; scoped.usage[0].scope = 'task';
+      const row = (model, scope, total, session, effort) => ({ date: '2026-09-25', model, scope, total, session, effort,
+        input: total - 10, cached: 0, fresh: total - 10, output: 10, reasoning: 2 });
+      scoped.usage.push(row('scope-main', 'task', 100, 2, 'max'), row('scope-helper', 'task', 50, 3, 'high'), row('codex-auto-review', 'auto_review', 1000, 4, 'low'));
+      scoped.tasks = scoped.usage.slice(1).map(item => ({ date: item.date, startedDate: item.date, model: item.model, effort: item.effort,
+        scope: item.scope, session: item.session, started: true, completed: true, duration: 2, ttfb: .5, error: false }));
+      scoped.compactions = scoped.tasks.map(({ date, model, effort, scope, session }) => ({ date, model, effort, scope, session }));
+      syntheticData = scoped; syntheticVersion++;
+      await page.evaluate(() => autoRefresh());
+      await page.waitForFunction(() => D.usageScopeSchema === 1 && !loadBusy);
+      await page.locator('#reset').click();
+      assert.equal(await page.locator('#usageScope').inputValue(), 'task');
+      assert.equal(await page.locator('#tokenCards .value').first().innerText(), '150');
+      const modelShares = await page.locator('#models .row').evaluateAll(nodes => nodes.map(node => [node.firstElementChild.textContent, node.lastElementChild.textContent]));
+      assert.deepEqual(modelShares, [['scope-main', '66.7%'], ['scope-helper', '33.3%']]);
+      assert.doesNotMatch(await page.locator('#model').innerText(), /codex-auto-review/);
+      record('Default task model shares exclude automatic review and retain ordinary helpers');
+      const priorValidVersion = await page.evaluate(() => lastUpdated);
+      syntheticData = { ...scoped, usage: scoped.usage.map((item, index) => index ? item : { ...item, total: 'bad' }) }; syntheticVersion++;
+      await page.evaluate(() => autoRefresh());
+      assert.equal(await page.evaluate(() => lastUpdated), priorValidVersion);
+      assert.equal(await page.locator('#tokenCards .value').first().innerText(), '150');
+      assert.match(await page.locator('#state').innerText(), /数据格式无效/);
+      syntheticData = scoped; syntheticVersion++; await page.evaluate(() => autoRefresh());
+      record('A malformed numeric snapshot retains the last valid charts and version in the real browser');
+      await page.locator('#model').selectOption('scope-main'); await page.locator('#effort').selectOption('max');
+      await page.locator('#model').selectOption('scope-helper');
+      assert.equal(await page.locator('#effort').inputValue(), '');
+      assert.equal(await page.locator('#tokenCards .value').first().innerText(), '50');
+      assert.equal(await page.locator('#start').inputValue(), calendarStart);
+      assert.equal(await page.locator('#end').inputValue(), calendarEnd);
+      await page.locator('#reset').click();
+      record('Ordinary model switches clear unsupported effort without losing the date range');
+      await page.locator('[data-page="eff"]').click();
+      assert.equal(await page.locator('#effCards .value').first().innerText(), '2');
+      await page.locator('#usageScope').selectOption('auto_review');
+      assert.equal(await page.locator('#effCards .value').first().innerText(), '1');
+      await page.locator('[data-page="token"]').click();
+      assert.equal(await page.locator('#tokenCards .value').first().innerText(), '1.0K');
+      assert.match(await page.locator('#models').innerText(), /codex-auto-review[\s\S]*100\.0%/);
+      record('Automatic review filters Token and request counts together');
+      await page.locator('#start').fill('2026-09-25'); await page.locator('#end').fill('2026-09-25'); await page.locator('#end').blur();
+      await page.locator('#model').selectOption('codex-auto-review'); await page.locator('#effort').selectOption('low');
+      await page.reload(); await page.waitForFunction(() => lastUpdated && D.usageScopeSchema === 1);
+      assert.equal(await page.locator('#usageScope').inputValue(), 'auto_review');
+      assert.equal(await page.locator('#usagePreset').inputValue(), 'custom');
+      assert.equal(await page.locator('#model').inputValue(), 'codex-auto-review');
+      assert.equal(await page.locator('#effort').inputValue(), 'low');
+      assert.equal(await page.locator('#tokenCards .value').first().innerText(), '1.0K');
+      record('Scope and model filters survive a real browser reload');
+      await page.locator('#usageScope').selectOption('task');
+      assert.equal(await page.locator('#model').inputValue(), ''); assert.equal(await page.locator('#effort').inputValue(), '');
+      assert.equal(await page.locator('#tokenCards .value').first().innerText(), '150');
+      await page.locator('#usageScope').selectOption('all');
+      const allShares = await page.locator('#models .row').evaluateAll(nodes => nodes.map(node => [node.firstElementChild.textContent, node.lastElementChild.textContent]));
+      assert.deepEqual(allShares, [['codex-auto-review', '87.0%'], ['scope-main', '8.7%'], ['scope-helper', '4.3%']]);
+      record('All raw tokens retain both scopes with a reconciled percentage denominator');
+      await page.locator('#reset').click();
+      await page.screenshot({ path: path.join(output, 'token-scopes-desktop.png'), fullPage: true });
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      const mobilePanels = await page.locator('#token .side > .panel').evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect(); return { x: box.x, y: box.y };
+      }));
+      assert.ok(mobilePanels.every(box => Math.abs(box.x - mobilePanels[0].x) < 2));
+      assert.ok(mobilePanels[1].y > mobilePanels[0].y && mobilePanels[2].y > mobilePanels[1].y);
+      await page.locator('#usageScope').selectOption('auto_review');
+      assert.equal(await page.locator('#tokenCards .value').first().innerText(), '1.0K');
+      await page.locator('#reset').click();
+      await page.screenshot({ path: path.join(output, 'token-scopes-mobile.png'), fullPage: true });
+      record('390px scope controls work and Token panels remain a single column without overflow');
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      syntheticData = fixture(); syntheticVersion++;
+      await page.evaluate(() => autoRefresh()); await page.waitForFunction(() => !D.usageScopeSchema && !loadBusy);
+      await page.locator('#reset').click();
+      assert.equal(await page.locator('#usageScope').inputValue(), 'all');
+      assert.equal(await page.locator('#usageScope').isDisabled(), true);
+      assert.match(await page.locator('#usageScopeNote').innerText(), /旧快照未区分/);
+      record('Legacy browser snapshots disclose their boundary and disable unsupported scopes');
+    } else {
+      const live = await apiSnapshot();
+      if (live.data.usageScopeSchema === 1) {
+        const format = value => value >= 1e9 ? (value / 1e9).toFixed(2) + 'B' : value >= 1e6 ? (value / 1e6).toFixed(1) + 'M'
+          : value >= 1e3 ? (value / 1e3).toFixed(1) + 'K' : String(Math.round(value));
+        for (const scope of ['task', 'auto_review', 'all']) {
+          await page.locator('#usageScope').selectOption(scope);
+          const start = await page.locator('#start').inputValue(), end = await page.locator('#end').inputValue();
+          const usage = live.data.usage.filter(item => item.date >= start && item.date <= end && (scope === 'all' || item.scope === scope));
+          const total = usage.reduce((sum, item) => sum + item.total, 0), grouped = new Map();
+          usage.forEach(item => grouped.set(item.model, (grouped.get(item.model) || 0) + item.total));
+          const expectedShares = [...grouped].sort((a, b) => b[1] - a[1]).map(([name, tokens]) => [name, (100 * tokens / total).toFixed(1) + '%']);
+          assert.equal(await page.locator('#tokenCards .value').first().innerText(), format(total));
+          const actualShares = await page.locator('#models .row').evaluateAll(nodes => nodes.map(node => [node.firstElementChild.textContent, node.lastElementChild.textContent]));
+          assert.deepEqual(actualShares, expectedShares);
+          await page.locator('[data-page="eff"]').click();
+          const tasks = live.data.tasks.filter(item => (item.startedDate || item.date) >= start && (item.startedDate || item.date) <= end && (scope === 'all' || item.scope === scope));
+          assert.equal(await page.locator('#effCards .value').first().innerText(), String(tasks.length));
+          await page.locator('[data-page="token"]').click();
+          record('Live ' + scope + ' Token/model/request values match independent API totals');
+        }
+        await page.locator('#reset').click();
+        await page.screenshot({ path: path.join(output, 'token-scopes-desktop.png'), fullPage: true });
+        await page.setViewportSize({ width: 390, height: 844 });
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+        await page.locator('#usageScope').selectOption('auto_review');
+        assert.equal(await page.locator('#usageScope').inputValue(), 'auto_review');
+        await page.locator('#reset').click();
+        await page.screenshot({ path: path.join(output, 'token-scopes-mobile.png'), fullPage: true });
+        await page.setViewportSize({ width: 1440, height: 1000 });
+        record('Live scope controls remain usable at 390px without horizontal overflow');
+      }
+    }
     const initial = await apiSnapshot(), historic = initial.data.usage.map(row => row.date).sort()[0];
     const usageChoices = await page.locator('#usagePreset option').evaluateAll(nodes => nodes.map(node => [node.value, node.textContent]));
     const skillChoices = await page.locator('#skillPreset option').evaluateAll(nodes => nodes.map(node => [node.value, node.textContent]));

@@ -39,6 +39,7 @@
       <label class="control">日期范围<select id="usagePreset"><option value="today">今天</option><option value="days7">近 7 天</option><option value="days30">近 30 天</option><option value="month" selected>本月</option><option value="all">全部历史</option><option value="custom">自定义</option></select></label>
       <label class="control">开始日期<input id="start" type="date"></label>
       <label class="control">结束日期<input id="end" type="date"></label>
+      <label class="control">统计范围<select id="usageScope"><option value="task" selected>任务用量（含子代理）</option><option value="auto_review">自动安全审查</option><option value="all">全部 Token</option></select></label>
       <label class="control">模型<select id="model"></select></label>
       <label class="control">推理强度<select id="effort"></select></label>
       <label class="control" id="metricBox">趋势指标
@@ -52,6 +53,7 @@
       <button class="btn" id="reset">重置筛选</button>
       <div class="range-tools">
         <div class="hint" id="rangeSummary"></div>
+        <div class="hint" id="usageScopeNote" role="status"></div>
       </div>
     </section>
     <p class="skill-empty note hidden" id="usageRangeError" role="status"></p>
@@ -60,8 +62,9 @@
       <section class="layout">
         <article class="panel">
           <h2 id="tokenTitle">每日 Total Token</h2>
-          <div class="trend" id="tokenTrend"></div>
+          <div class="trend" id="tokenTrend" role="group" aria-label="每日 Token，按日历日期展示" aria-describedby="tokenTrendNote"></div>
           <div class="axis"><span id="first"></span><span id="last"></span></div>
+          <p class="note" id="tokenTrendNote"></p>
         </article>
         <aside class="side pref-break">
           <article class="panel"><h2>Token 构成占比</h2><div id="mix"></div></article>
@@ -88,8 +91,9 @@
         <article class="panel">
           <h2>每日请求量</h2>
           <p class="note">按请求开始日期计入，包含完成、报错与未完成请求；缺失开始事件时使用已知事件日期。</p>
-          <div class="trend" id="taskTrend"></div>
+          <div class="trend" id="taskTrend" role="group" aria-label="每日请求量，按日历日期展示" aria-describedby="taskTrendNote"></div>
           <div class="axis"><span id="taskFirst"></span><span id="taskLast"></span></div>
+          <p class="note" id="taskTrendNote"></p>
         </article>
         <article class="panel">
           <h2>时长口径</h2>
@@ -177,7 +181,10 @@
         <ul>
           <li>仅扫描本机 Codex 的会话与归档会话 JSONL。</li>
           <li>原始 JSONL 始终只读，不上传数据。</li>
-          <li>Token 与请求日期按 Asia/Shanghai 归属。首次打开默认显示当前统计月；可切换全部或选择历史日期。日期、模型与推理强度筛选共同作用于 Token 总览和请求与效率。</li>
+          <li>Token 与请求日期按 Asia/Shanghai 归属。首次打开默认显示当前统计月和任务用量（含子代理）；可切换自动安全审查或全部 Token。日期、统计范围、模型与推理强度筛选共同作用于 Token 总览和请求与效率。</li>
+          <li>自动安全审查是自动授权安全检查，单独归类；普通子代理归入任务用量。各线程的模型与推理强度分别归属，不用父聊天设置覆盖子线程。</li>
+          <li>模型占比按当前筛选的原始 Token 计算，不代表官方套餐额度占比，也不能据此换算套餐或付费额度。</li>
+          <li>Token 来源包含消耗统计事件与逐请求消耗记录；逐请求记录只补计缺少对应统计事件的请求，并按响应去重。</li>
           <li>预设日期范围随快照截至日推进；本月指自然月初至截至日。手动改日期会切到自定义，并在重载和自动更新后保留。</li>
         </ul>
         <h3>刷新机制</h3>
@@ -192,7 +199,7 @@
         <ul>
           <li>Total = Input + Output；Fresh Input = Input − Cached Input。</li>
           <li>Cache、Fresh、Output 互斥；Reasoning 属于 Output，不重复计入 Total。</li>
-          <li>请求按会话与 Turn 合并；每日请求量包含已完成、报错和未完成请求。</li>
+          <li>请求按实际线程与 Turn 合并；会话数按实际线程去重，包含所选范围内的子代理线程。每日请求量包含已完成、报错和未完成请求。</li>
           <li>请求有开始日期时按开始日期归属；完成时长包含思考、生成、工具执行与等待。</li>
           <li>首响和完成时长分别排除缺失值；百分位取排序后位置 floor((n − 1) × p) 对应的样本。</li>
         </ul>

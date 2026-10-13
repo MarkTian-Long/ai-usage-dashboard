@@ -19,6 +19,8 @@ const VIEW_KEY = 'codexDashboardView';
 const PREF_KEY = 'codexPrefs';
 const SKILL_SOURCES = { personal: '个人', workspace: '工作区', system: '系统', plugin: '插件', unknown: '未知' };
 const DATE_PRESETS = ['today', 'days7', 'days30', 'month', 'all', 'custom'];
+const USAGE_SCOPES = { task: '任务用量（含子代理）', auto_review: '自动安全审查', all: '全部 Token' };
+let usageScopePreference = 'task';
 const SKILL_PRESETS = DATE_PRESETS;
 const SKILL_OBSERVATIONS = ['all', 'active', 'unobserved', 'currentUnread', 'notFound', 'ambiguous', 'single', 'unknown', 'duplicate'];
 const SKILL_SORTS = ['reads', 'readsAsc', 'tasks', 'recent', 'name'];
@@ -51,9 +53,23 @@ function writeStorage(kind, key, value) {
   try { window[kind].setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 function taskDate(task) { return task.startedDate || task.date; }
-function dateBounds(data) {
-  const dates = [...data.usage.map(row => row.date), ...data.tasks.map(taskDate),
-    ...data.compactions.map(row => row.date)].filter(Boolean).sort();
+// dashboard-usage-scope-v1: classification is explicit; model names alone never define the view.
+function hasUsageScopes(data = D) { return data.usageScopeSchema === 1; }
+function usageScope(data = D) {
+  const selected = q('#usageScope').value;
+  return hasUsageScopes(data) && Object.prototype.hasOwnProperty.call(USAGE_SCOPES, selected) ? selected : 'all';
+}
+function scopeRows(rows, scope, data = D) {
+  return !hasUsageScopes(data) || scope === 'all' ? rows : rows.filter(row => row.scope === scope);
+}
+function restoreUsageScope(saved) {
+  usageScopePreference = Object.prototype.hasOwnProperty.call(USAGE_SCOPES, saved) ? saved : 'task';
+  q('#usageScope').disabled = !hasUsageScopes();
+  q('#usageScope').value = hasUsageScopes() ? usageScopePreference : 'all';
+}
+function dateBounds(data, scope = 'all') {
+  const dates = [...scopeRows(data.usage, scope, data).map(row => row.date), ...scopeRows(data.tasks, scope, data).map(taskDate),
+    ...scopeRows(data.compactions, scope, data).map(row => row.date)].filter(Boolean).sort();
   return { start: dates[0] || '', end: dates.at(-1) || '' };
 }
 function snapshotDay(data) {
@@ -73,7 +89,7 @@ function presetDateRange(asOf, preset, firstDate, custom = {}) {
   }
   return { start, end: asOf };
 }
-function usageDateRange(data, preset, custom) { return presetDateRange(snapshotDay(data), preset, dateBounds(data).start, custom); }
+function usageDateRange(data, preset, custom, scope = 'all') { return presetDateRange(snapshotDay(data), preset, dateBounds(data, scope).start, custom); }
 function defaultRange(data) { return usageDateRange(data, 'month'); }
 function usageRangeError(data, start, end) {
   if (!calendarDate(start) || !calendarDate(end)) return '请选择完整、有效的开始和结束日期。';
@@ -82,16 +98,22 @@ function usageRangeError(data, start, end) {
   return '';
 }
 function opts(id, field, keep = '') {
-  const values = [...new Set([...D.usage, ...D.tasks].map(row => row[field]).filter(Boolean))].sort();
+  const values = [...new Set(scopeRows([...D.usage, ...D.tasks, ...D.compactions], usageScope()).map(row => row[field]).filter(Boolean))].sort();
   const element = q(id);
   element.innerHTML = '<option value="">' + (field === 'model' ? '全部模型' : '全部推理强度') + '</option>' + values.map(value =>
     '<option value="' + Esc(value) + '">' + Esc(value) + '</option>').join('');
   element.value = values.includes(keep) ? keep : '';
 }
+function reconcileUsageDimensions(model, effort) {
+  opts('#model', 'model', model); opts('#effort', 'effort', effort);
+  const selectedModel = q('#model').value, selectedEffort = q('#effort').value;
+  if (selectedModel && selectedEffort && !scopeRows([...D.usage, ...D.tasks, ...D.compactions], usageScope())
+    .some(row => row.model === selectedModel && row.effort === selectedEffort)) q('#effort').value = '';
+}
 function filter(rows, getDate = row => row.date) {
   const start = q('#start').value || ds, end = q('#end').value || de;
   const model = q('#model').value, effort = q('#effort').value;
-  return rows.filter(row => (!start || getDate(row) >= start) && (!end || getDate(row) <= end)
+  return scopeRows(rows, usageScope()).filter(row => (!start || getDate(row) >= start) && (!end || getDate(row) <= end)
     && (!model || row.model === model) && (!effort || row.effort === effort));
 }
 function Q(values, percentile) {
@@ -100,8 +122,7 @@ function Q(values, percentile) {
 }
 function samples(tasks, field) {
   return tasks.map(task => task[field])
-    .filter(value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0)
-    .map(Number);
+    .filter(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
 }
 function totals(rows) {
   const result = { total: 0, input: 0, cached: 0, fresh: 0, output: 0 };
@@ -118,14 +139,45 @@ function daily(rows, getValue, getDate = row => row.date) {
   });
   return [...days].sort(([a], [b]) => a.localeCompare(b));
 }
-function chart(rows, id, getValue, getDate) {
+function calendarTrend(points, start, end) {
+  if (!calendarDate(start) || !calendarDate(end) || start > end) {
+    start = points[0]?.[0] || ''; end = points.at(-1)?.[0] || '';
+  }
+  if (!start || !end) return { start, end, span: 0, sparse: false, points: [] };
+  const first = Date.parse(start + 'T00:00:00Z'), span = Math.round((Date.parse(end + 'T00:00:00Z') - first) / 86400000) + 1;
+  const values = new Map(points.filter(([date]) => date >= start && date <= end)), sparse = span > 366;
+  const trend = [];
+  if (sparse) {
+    for (const [date, value] of values) trend.push({ date, value, observed: true });
+  } else {
+    for (let offset = 0; offset < span; offset++) {
+      const date = new Date(first + offset * 86400000).toISOString().slice(0, 10);
+      trend.push({ date, value: values.get(date) || 0, observed: values.has(date) });
+    }
+  }
+  return { start, end, span, sparse, points: trend };
+}
+function chart(rows, id, getValue, getDate, noteId) {
   const points = daily(rows, getValue, getDate);
   const max = Math.max(1, ...points.map(([, value]) => value));
-  q(id).innerHTML = points.map(([date, value]) => '<div class="barcol"><i style="height:'
-    + (100 * value / max) + '%" data-tip="' + Esc(date) + ' · ' + F(value)
-    + '" title="' + Esc(date) + ' · ' + F(value) + '"></i></div>').join('')
-    || '<span class="hint">当前筛选没有数据</span>';
-  return points.map(([date]) => date);
+  const trend = calendarTrend(points, q('#start').value || ds, q('#end').value || de);
+  const firstDay = Date.parse(trend.start + 'T00:00:00Z'), element = q(id);
+  element.classList.add('usage-calendar');
+  element.classList.toggle('usage-sparse', trend.sparse); element.classList.toggle('usage-dense', trend.span > 60);
+  element.innerHTML = trend.points.map(({ date, value, observed }) => {
+    const offset = Math.round((Date.parse(date + 'T00:00:00Z') - firstDay) / 86400000);
+    const position = trend.sparse ? ' style="left:' + (100 * offset / trend.span) + '%;width:' + (100 / trend.span) + '%"' : '';
+    const unit = id === '#taskTrend' ? '次请求' : 'Token';
+    const label = date + ' · ' + (observed ? F(value) + ' ' + unit + (value === 0 ? '（有记录）' : '') : '无可观测记录');
+    const edge = offset / trend.span < .1 ? ' usage-label-left' : offset / trend.span > .85 ? ' usage-label-right' : '';
+    return '<div class="barcol usage-day' + (observed ? value === 0 ? ' usage-day-zero' : '' : ' usage-day-missing') + edge
+      + '" data-date="' + date + '" data-observed="' + observed + '" tabindex="0" role="img" aria-label="' + Esc(label)
+      + '" data-tip="' + Esc(label) + '" title="' + Esc(label) + '"' + position + '><i style="height:' + (100 * value / max) + '%"></i></div>';
+  }).join('') || '<span class="hint">当前筛选没有可观测记录</span>';
+  if (noteId) q(noteId).textContent = (trend.sparse ? '跨度超过一年，柱按实际日期位置展示。' : '按筛选日历日期展示。')
+    + '空白或虚线表示无可观测记录，不等于实际用量为零；有记录的零值以实线标记。'
+    + (points.length ? '' : '当前筛选没有可观测记录。');
+  return [trend.start, trend.end];
 }
 function bars(rows, id) {
   q(id).innerHTML = rows.map(row => '<div class="row"><span>' + Esc(row.name)
@@ -158,12 +210,12 @@ function renderTokens(usage, tasks) {
   cards('#tokenCards', [
     ['筛选 Total', F(sum.total), '累计'], ['活跃日', sum.days, '有 Token 的日期'],
     ['活跃日日均', F(sum.days ? sum.total / sum.days : 0), 'Token'],
-    ['单日峰值', F(peak), peakDate], ['会话数', sum.sessions, '按会话 ID 去重'],
+    ['单日峰值', F(peak), peakDate], ['会话数', sum.sessions, hasUsageScopes() ? '按实际线程 ID 去重' : '按旧快照会话 ID 去重'],
     ['对话轮数', tasks.length, '按轮次去重']
   ]);
   const key = q('#metric').value;
   q('#tokenTitle').textContent = '每日 ' + q('#metric').selectedOptions[0].textContent;
-  axis('#first', '#last', chart(usage, '#tokenTrend', row => row[key]));
+  axis('#first', '#last', chart(usage, '#tokenTrend', row => row[key], undefined, '#tokenTrendNote'));
   const percent = value => sum.total ? 100 * value / sum.total : 0;
   const reasoning = usage.reduce((total, row) => total + (Number(row.reasoning) || 0), 0);
   const reasoningShare = sum.output ? 100 * reasoning / sum.output : 0;
@@ -181,7 +233,7 @@ function renderEfficiency(tasks, compactions) {
   const bad = done.filter(task => task.error), open = tasks.filter(task => task.started && !task.completed);
   const durations = samples(good, 'duration'), firstTokens = samples(good, 'ttfb');
   cards('#effCards', [
-    ['去重请求', tasks.length, '会话 + Turn 合并'], ['已完成', done.length, '完成事件'],
+    ['去重请求', tasks.length, hasUsageScopes() ? '实际线程 + Turn 合并' : '旧快照会话 + Turn 合并'], ['已完成', done.length, '完成事件'],
     ['首响 P50', Sec(Q(firstTokens, .5)), 'P90 ' + Sec(Q(firstTokens, .9)) + ' · 样本 ' + firstTokens.length],
     ['完成时长 P50', Sec(Q(durations, .5)), 'P90 ' + Sec(Q(durations, .9)) + ' · 样本 ' + durations.length],
     ['压缩率', tasks.length ? (100 * compactions.length / tasks.length).toFixed(1) + '%' : '—', '每百请求'],
@@ -201,7 +253,7 @@ function renderEfficiency(tasks, compactions) {
   q('#compaction').innerHTML = '<div class="value">' + compactions.length
     + '</div><div class="hint">去重后的压缩信号；不同事件类型不直接相加。</div>';
   // Tasks are deduplicated by the generator. Every task counts, including open/error tasks.
-  axis('#taskFirst', '#taskLast', chart(tasks, '#taskTrend', () => 1, taskDate));
+  axis('#taskFirst', '#taskLast', chart(tasks, '#taskTrend', () => 1, taskDate, '#taskTrendNote'));
 }
 function renderLegacySkills() {
   const skills = D.skills;
@@ -620,7 +672,10 @@ function render() {
     renderEfficiency(filter(D.tasks, taskDate), filter(D.compactions));
   }
   renderSkills();
-  q('#rangeSummary').textContent = rangeError || '默认本月（自然月初至快照截至日）；重置筛选恢复全部模型、全部推理强度。当前范围：' + start + ' 至 ' + end + '（含首尾） · Token 与请求共享筛选。';
+  q('#rangeSummary').textContent = rangeError || '默认本月（自然月初至快照截至日）；重置筛选恢复' + (hasUsageScopes() ? '任务用量、' : '') + '全部模型、全部推理强度。当前范围：' + start + ' 至 ' + end + '（含首尾） · Token 与请求共享筛选。';
+  q('#usageScopeNote').textContent = hasUsageScopes()
+    ? '当前统计：' + USAGE_SCOPES[usageScope()] + '。模型占比按原始 Token 计算，不代表官方套餐额度占比。'
+    : '旧快照未区分任务与自动安全审查，当前仅展示全部 Token；模型归属未按新口径核验。点击“立即刷新”后可分开查看。原始 Token 不代表官方套餐额度。';
   selectPage(q('.tab[aria-selected=true]').dataset.page);
   q('#cacheInfo').textContent = D.refresh
     ? '本次源文件缓存：' + D.refresh.reused + ' 个复用，' + D.refresh.reparsed + ' 个重新解析。'
@@ -631,11 +686,16 @@ function render() {
   if (typeof D.refresh?.elapsedMs === 'number' && Number.isFinite(D.refresh.elapsedMs) && D.refresh.elapsedMs >= 0) {
     q('#cacheInfo').textContent += ' 汇总阶段耗时 ' + Sec(D.refresh.elapsedMs / 1000) + '。';
   }
+  if (Number.isSafeInteger(D.refresh?.supplementalTokenRequests) && D.refresh.supplementalTokenRequests > 0
+    && Number.isSafeInteger(D.refresh?.supplementalTokens) && D.refresh.supplementalTokens >= 0) {
+    q('#cacheInfo').textContent += ' Token 汇总已补计 ' + D.refresh.supplementalTokenRequests + ' 条逐请求记录（'
+      + F(D.refresh.supplementalTokens) + ' Token，已按响应去重）。';
+  }
 }
 
 function saveView() {
   viewMemory = { start: q('#start').value, end: q('#end').value, model: q('#model').value,
-    rangePreset: q('#usagePreset').value,
+    rangePreset: q('#usagePreset').value, usageScope: usageScopePreference,
     effort: q('#effort').value, metric: q('#metric').value,
     skills: { ...skillView },
     page: q('.tab[aria-selected=true]').dataset.page };
@@ -656,13 +716,14 @@ function selectPage(page) {
 function validDate(value) { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value); }
 function restoreView() {
   const view = Object.keys(viewMemory).length ? viewMemory : readStorage('sessionStorage', VIEW_KEY, viewMemory);
+  restoreUsageScope(view.usageScope);
   const initial = defaultRange(D);
   // Old saved dates had no preset marker. Preserve them as a custom historical range.
   const preset = DATE_PRESETS.includes(view.rangePreset) ? view.rangePreset : calendarDate(view.start) || calendarDate(view.end) ? 'custom' : 'month';
-  const range = usageDateRange(D, preset, { start: typeof view.start === 'string' ? view.start : initial.start, end: typeof view.end === 'string' ? view.end : initial.end });
+  const range = usageDateRange(D, preset, { start: typeof view.start === 'string' ? view.start : initial.start, end: typeof view.end === 'string' ? view.end : initial.end }, usageScope());
   q('#usagePreset').value = preset; q('#start').value = range.start; q('#end').value = range.end;
   q('#start').max = q('#end').max = snapshotDay(D);
-  opts('#model', 'model', view.model); opts('#effort', 'effort', view.effort);
+  reconcileUsageDimensions(view.model, view.effort);
   q('#metric').value = ['total', 'cached', 'fresh', 'output'].includes(view.metric) ? view.metric : 'total';
   selectPage(view.page);
   restoreSkillView(view.skills);
@@ -672,15 +733,26 @@ function localDay(date) {
 }
 function chooseUsageRange(preset) {
   if (preset !== 'custom') {
-    const range = usageDateRange(D, preset); q('#start').value = range.start; q('#end').value = range.end;
+    const range = usageDateRange(D, preset, undefined, usageScope()); q('#start').value = range.start; q('#end').value = range.end;
   }
+  saveView(); render();
+}
+function changeUsageScope() {
+  const model = q('#model').value, effort = q('#effort').value;
+  restoreUsageScope(q('#usageScope').value);
+  reconcileUsageDimensions(model, effort);
+  chooseUsageRange(q('#usagePreset').value);
+}
+function changeUsageModel() {
+  reconcileUsageDimensions(q('#model').value, q('#effort').value);
   saveView(); render();
 }
 function reset() {
   const initial = defaultRange(D);
   q('#start').value = initial.start; q('#end').value = initial.end;
   q('#usagePreset').value = 'month';
-  q('#model').value = ''; q('#effort').value = ''; q('#metric').value = 'total';
+  restoreUsageScope('task');
+  opts('#model', 'model'); opts('#effort', 'effort'); q('#metric').value = 'total';
   saveView(); render();
 }
 
@@ -711,9 +783,30 @@ async function status() {
   return state;
 }
 function validateData(data) {
-  if (!data || !['usage', 'tasks', 'compactions'].every(key => Array.isArray(data[key]))) {
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !['usage', 'tasks', 'compactions'].every(key => Array.isArray(data[key]))) {
     throw Error('数据格式无效');
   }
+  if (Object.prototype.hasOwnProperty.call(data, 'usageScopeSchema')) {
+    if (data.usageScopeSchema !== 1 || !['usage', 'tasks', 'compactions'].every(key => data[key].every(row =>
+      row && ['task', 'auto_review'].includes(row.scope)))) throw Error('Token 统计范围数据格式无效');
+  }
+  const identity = row => row && typeof row === 'object' && !Array.isArray(row) && calendarDate(row.date)
+    && Number.isSafeInteger(row.session) && row.session >= 1
+    && ['model', 'effort'].every(key => typeof row[key] === 'string' && Boolean(row[key].trim()));
+  const timing = value => value == null || typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  for (const row of data.usage) {
+    if (!identity(row) || !['total', 'input', 'cached', 'fresh', 'output', 'reasoning'].every(key => Number.isSafeInteger(row[key]) && row[key] >= 0)
+      || row.cached > row.input || row.reasoning > row.output || row.total !== row.input + row.output || row.fresh !== row.input - row.cached) {
+      throw Error('Token 用量数据格式无效');
+    }
+  }
+  for (const row of data.tasks) {
+    if (!identity(row) || typeof row.started !== 'boolean' || typeof row.completed !== 'boolean' || !row.started && !row.completed
+      || row.startedDate != null && !calendarDate(row.startedDate)
+      || row.error !== undefined && typeof row.error !== 'boolean' || row.error && !row.completed
+      || !timing(row.duration) || !timing(row.ttfb)) throw Error('请求统计数据格式无效');
+  }
+  if (!data.compactions.every(identity)) throw Error('上下文压缩数据格式无效');
   if (Object.prototype.hasOwnProperty.call(data, 'skills')) validateSkills(data.skills);
   return data;
 }
@@ -876,8 +969,10 @@ function initialize() {
   q('#skillCategory').innerHTML = '<option value="all">全部用途</option>' + SKILL_CATEGORIES.map(row => '<option value="' + row.id + '">' + row.label + '</option>').join('') + '<option value="other">其他 / 待分类</option>';
   q('#reset').onclick = reset; q('#refresh').onclick = manualRefresh;
   qa('#start,#end').forEach(element => element.onchange = () => { q('#usagePreset').value = 'custom'; saveView(); render(); });
-  qa('#model,#effort,#metric').forEach(element => element.onchange = () => { saveView(); render(); });
+  q('#model').onchange = changeUsageModel;
+  qa('#effort,#metric').forEach(element => element.onchange = () => { saveView(); render(); });
   q('#usagePreset').onchange = () => chooseUsageRange(q('#usagePreset').value);
+  q('#usageScope').onchange = changeUsageScope;
   qa('.tab').forEach(button => button.onclick = () => { selectPage(button.dataset.page); saveView(); });
   qa('#skillPreset,#skillSource,#skillScope,#skillCategory,#skillObservation,#skillSort').forEach(element => element.onchange = () => changeSkillFilters());
   qa('#skillStart,#skillEnd').forEach(element => element.onchange = () => changeSkillFilters(true));

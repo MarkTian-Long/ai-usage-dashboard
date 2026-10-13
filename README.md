@@ -30,6 +30,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-ai-usage-dashboard-s
 
 运行 `register-ai-usage-dashboard-maintenance.ps1` 会为当前用户登记每分钟一次的短时计划任务。它通过隐藏的 WScript 启动器运行，不弹出 PowerShell 控制台；检查回环端口并在服务缺失时重新启动。若当前小时尚无已提交数据版本，则通过本地 API 刷新并核对磁盘版本。失败后下一分钟重试，任务在电池供电时也会运行。已打开页面每 30 秒轮询一次新版本。此任务只在当前用户已登录时运行；注销期间不运行，重新登录后恢复。用 `-Remove` 可移除任务。
 
+## Token 与请求统计范围
+
+默认展示“任务用量（含子代理）”，包含主任务及普通子代理。“自动安全审查”单独展示 guardian 审批线程；“全部 Token”保留两类原始用量。日期、统计范围、模型与推理强度共同作用于 Token、请求和上下文压缩；这些原始 Token 占比不代表官方套餐额度或付费比例。
+
+归属优先使用 `session_meta.id` 的实际线程身份，缺失时才使用 `session_id`；父任务标识不作为子线程的身份。模型与强度在读取该线程的上下文及设置时绑定到每条记录，首次设置前的 Token 也可由此前的 `turn_context` 归属。活动与归档的同线程副本按相邻数值状态去重；会话数按实际线程计数。
+
+Token 优先使用 `token_count` 的消耗记录；存在逐请求 `token_usage_record`、却缺少对应消耗记录时，按响应身份去重补计。已匹配响应、活动/归档重复响应及同实际线程的已覆盖数值状态不会再相加。逐请求记录的父任务标识不替代实际线程身份；补计数量可在统计说明查看。
+
+事件缓存版本 7 会从只读日志重建旧版缓存，因为旧版缺少实际线程归属或逐请求消耗记录。没有分类的旧数据快照明确显示全部 Token，刷新后才能使用分开的范围。无效核心数值、日期、身份、状态或时长会使新快照被拒绝，页面保留上一份有效统计。
+
 ## Skill 说明读取
 
 Skill 页签提供去重总览、每日趋势、来源分布和审计明细；可按日期、名称/简介、来源、观察项筛选并排序，支持近 7 天、近 30 天、本月、全部历史或自定义区间，以及手动导出当前审计快照。趋势图显示数量刻度并可查看逐日精确读数。读取统计来自 `SourceRoot` 下的 `sessions/` 与 `archived_sessions/`，排除可识别的 guardian 和子代理；按会话、轮次与同来源 Skill 去重。可用清单、名称提及和只列路径的命令均不计数。
@@ -38,7 +48,7 @@ Skill 页签提供去重总览、每日趋势、来源分布和审计明细；�
 
 可按用途候选分类查找 Skill，并将当前有可用说明的项目选入任务组合，生成可检查和复制的口令草稿。命名组合只保存标识和来源到当前浏览器；任务目标与草稿不保存到服务，不自动发送或执行。加载组合时重新检查当前资料，失效或冲突项需要重新选择。优先复用已有流程 Skill，避免另建重复的专家编排。
 
-来源区分个人、工作区、系统、插件和未知。窗口独立于 Token 筛选；整体任务与轮次按并集计算，不将每个 Skill 的人数/轮次相加。观察提示用于人工复核，历史观测列表不代表全部安装清单，空记录不等于从未使用。缓存版本 5 按文件增量复用，读取函数指纹独立于汇总/界面改动；Token 口径与后台维护链路不变。详细识别边界、刷新成本和审计用法见 [Skill 统计口径](docs/skill-read-metrics.md)。
+来源区分个人、工作区、系统、插件和未知。窗口独立于 Token 筛选；整体任务与轮次按并集计算，不将每个 Skill 的人数/轮次相加。观察提示用于人工复核，历史观测列表不代表全部安装清单，空记录不等于从未使用。缓存版本 7 按文件增量复用，读取函数指纹独立于汇总/界面改动；后台维护链路不变。详细识别边界、刷新成本和审计用法见 [Skill 统计口径](docs/skill-read-metrics.md)。
 
 可发布的验证方法见下方“验证”。本机验收记录含真实使用统计，仅保留在本地，不进入仓库。
 
@@ -49,6 +59,8 @@ Skill 页签提供去重总览、每日趋势、来源分布和审计明细；�
 ```powershell
 node .\tests\Test-Frontend.cjs
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Generator.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenAttribution.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenFallback.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Service.ps1 -ServiceHost powershell.exe
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UiContract.ps1
 ```
