@@ -1,0 +1,16 @@
+{"timestamp":"2026-08-31T15:50:00Z","type":"session_meta","payload":{"id":"fixture-main"}}
+{"timestamp":"2026-08-31T15:51:00Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"fixture-model-a","reasoning_effort":"high"}}}
+{"timestamp":"2026-08-31T15:59:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"cross-month"}}
+{"timestamp":"2026-08-31T16:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120},"total_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}}}
+{"timestamp":"2026-08-31T16:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120},"total_token_usage":{"input_tokens":100,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}}}
+{"timestamp":"2026-08-31T16:00:02Z","type":"event_msg","payload":{"type":"compacted","window_id":"window-1"}}
+{"timestamp":"2026-08-31T16:00:02.500Z","type":"event_msg","payload":{"type":"context_compacted","window_id":"window-1"}}
+{"timestamp":"2026-08-31T16:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":3,"total_tokens":60},"total_token_usage":{"input_tokens":150,"cached_input_tokens":50,"output_tokens":30,"reasoning_output_tokens":8,"total_tokens":180}}}}
+{"timestamp":"2026-08-31T16:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":3,"total_tokens":60},"total_token_usage":{"input_tokens":200,"cached_input_tokens":70,"output_tokens":40,"reasoning_output_tokens":11,"total_tokens":240}}}}
+{"timestamp":"2026-08-31T16:01:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"cross-month","duration_ms":120000,"time_to_first_token_ms":1250}}
+{"timestamp":"2026-08-31T16:02:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"missing-timings"}}
+{"timestamp":"2026-08-31T16:03:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"missing-timings"}}
+{"timestamp":"2026-08-31T16:04:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"zero-timings"}}
+{"timestamp":"2026-08-31T16:04:01Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"zero-timings","duration_ms":0,"time_to_first_token_ms":0}}
+{"timestamp":"2026-08-31T16:05:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"still-open"}}
+{"timestamp":"2026-08-31T16:05:01Z","type":"event_msg","payload":{"type":"compacted","window_id":"window-2"}}

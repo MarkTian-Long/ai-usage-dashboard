@@ -1,0 +1,5 @@
+@{
+    # Optional. When omitted, the dashboard uses CODEX_HOME or $HOME/.codex.
+    # Set this when the scheduled task runs under a different Windows account.
+    SourceRoot = 'C:\\path\\to\\.codex'
+}

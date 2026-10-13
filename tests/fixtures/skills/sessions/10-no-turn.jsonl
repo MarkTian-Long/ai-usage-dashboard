@@ -1,0 +1,2 @@
+{"timestamp":"2026-09-27T04:00:00Z","type":"session_meta","payload":{"id":"skill-missing-turn","source":"cli"}}
+{"timestamp":"2026-09-27T04:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/missing-turn/SKILL.md'\"}"}}

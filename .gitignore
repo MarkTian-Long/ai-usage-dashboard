@@ -1,0 +1,20 @@
+# Runtime output: derived from local Codex JSONL and never versioned.
+codex-usage-dashboard.html
+codex-usage-dashboard-data.json
+.codex-usage-dashboard-cache/
+*.log
+
+# Per-machine configuration may contain a local source path.
+codex-usage-dashboard.local.psd1
+
+# Local acceptance evidence contains real usage statistics; keep it off GitHub.
+docs/skill-read-validation.md
+docs/skill-read-metrics.local.md
+
+# Test and editor artifacts.
+tests/service-fixtures/
+tests/synthetic-metadata-runs/
+node_modules/
+.env
+.env.*
+!.env.example

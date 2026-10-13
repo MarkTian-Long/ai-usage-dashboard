@@ -1,0 +1,21 @@
+{"timestamp":"2026-08-29T00:00:00Z","type":"session_meta","payload":{"id":"skill-time-boundaries","source":"cli"}}
+{"timestamp":"2026-08-29T15:59:59Z","type":"turn_context","payload":{"turn_id":"before-30"}}
+{"timestamp":"2026-08-29T15:59:59Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/before-30/SKILL.md'\"}"}}
+{"timestamp":"2026-08-29T16:00:00Z","type":"turn_context","payload":{"turn_id":"at-30"}}
+{"timestamp":"2026-08-29T16:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/at-30/SKILL.md'\"}"}}
+{"timestamp":"2026-09-21T15:59:59Z","type":"turn_context","payload":{"turn_id":"before-7"}}
+{"timestamp":"2026-09-21T15:59:59Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/before-7/SKILL.md'\"}"}}
+{"timestamp":"2026-09-21T16:00:00Z","type":"turn_context","payload":{"turn_id":"at-7"}}
+{"timestamp":"2026-09-21T16:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/at-7/SKILL.md'\"}"}}
+{"timestamp":"2026-09-28T15:59:59Z","type":"turn_context","payload":{"turn_id":"end-today"}}
+{"timestamp":"2026-09-28T15:59:59Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/end-today/SKILL.md'\"}"}}
+{"timestamp":"2026-09-28T16:00:00Z","type":"turn_context","payload":{"turn_id":"future-day"}}
+{"timestamp":"2026-09-28T16:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/future-day/SKILL.md'\"}"}}
+{"timestamp":"2026-09-22T00:00:00+08:00","type":"turn_context","payload":{"turn_id":"offset-timestamp"}}
+{"timestamp":"2026-09-22T00:00:00+08:00","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/offset-timestamp/SKILL.md'\"}"}}
+{"timestamp":"2026-09-21T15:59:59Z","type":"turn_context","payload":{"turn_id":"same-turn-cross-seven"}}
+{"timestamp":"2026-09-21T15:59:59Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"boundary-repeat","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/cross-seven/SKILL.md'\"}"}}
+{"timestamp":"2026-09-21T16:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"boundary-repeat","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/cross-seven/SKILL.md'\"}"}}
+{"timestamp":"2026-08-29T15:59:59Z","type":"turn_context","payload":{"turn_id":"same-turn-cross-thirty"}}
+{"timestamp":"2026-08-29T15:59:59Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"boundary-repeat","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/cross-thirty/SKILL.md'\"}"}}
+{"timestamp":"2026-08-29T16:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"boundary-repeat","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/cross-thirty/SKILL.md'\"}"}}

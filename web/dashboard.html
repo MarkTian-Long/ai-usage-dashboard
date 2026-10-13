@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AI 使用看板</title>
+  <style>/*__DASHBOARD_CSS__*/</style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <div>
+        <div class="eyebrow">LOCAL · READ ONLY</div>
+        <h1 class="title">AI 使用看板</h1>
+        <div class="sub" id="sub">正在加载数据…</div>
+      </div>
+      <div class="actions">
+        <div class="settings">
+          <button class="btn" id="set">自定义视图</button>
+          <div class="menu hidden" id="menu">
+            <div class="hint">设置只保存在当前浏览器</div>
+            <label><input type="checkbox" data-pref="break" checked> 显示构成与标签</label>
+            <label><input type="checkbox" data-pref="dist" checked> 显示时长分布</label>
+            <label><input type="checkbox" data-pref="compact" checked> 显示上下文压缩</label>
+            <button class="btn" id="restore">恢复默认</button>
+          </div>
+        </div>
+        <button class="btn" id="infoButton">统计说明</button>
+        <button class="btn primary" id="refresh">立即刷新</button>
+        <span class="hint" id="state" role="status" aria-live="polite"></span>
+      </div>
+    </header>
+    <nav class="tabs" aria-label="统计视图">
+      <button class="tab" data-page="token" aria-selected="true">Token 总览</button>
+      <button class="tab" data-page="eff" aria-selected="false">请求与效率</button>
+      <button class="tab" data-page="skill" aria-selected="false">Skill 说明读取</button>
+    </nav>
+    <section class="filters" id="usageFilters" aria-label="筛选条件">
+      <label class="control">日期范围<select id="usagePreset"><option value="today">今天</option><option value="days7">近 7 天</option><option value="days30">近 30 天</option><option value="month" selected>本月</option><option value="all">全部历史</option><option value="custom">自定义</option></select></label>
+      <label class="control">开始日期<input id="start" type="date"></label>
+      <label class="control">结束日期<input id="end" type="date"></label>
+      <label class="control">模型<select id="model"></select></label>
+      <label class="control">推理强度<select id="effort"></select></label>
+      <label class="control" id="metricBox">趋势指标
+        <select id="metric">
+          <option value="total">Total Token</option>
+          <option value="cached">Cache Read</option>
+          <option value="fresh">Fresh Input</option>
+          <option value="output">Output</option>
+        </select>
+      </label>
+      <button class="btn" id="reset">重置筛选</button>
+      <div class="range-tools">
+        <div class="hint" id="rangeSummary"></div>
+      </div>
+    </section>
+    <p class="skill-empty note hidden" id="usageRangeError" role="status"></p>
+    <section id="token">
+      <section class="cards" id="tokenCards"></section>
+      <section class="layout">
+        <article class="panel">
+          <h2 id="tokenTitle">每日 Total Token</h2>
+          <div class="trend" id="tokenTrend"></div>
+          <div class="axis"><span id="first"></span><span id="last"></span></div>
+        </article>
+        <aside class="side pref-break">
+          <article class="panel"><h2>Token 构成占比</h2><div id="mix"></div></article>
+          <article class="panel"><h2>模型 Token 占比</h2><div id="models"></div></article>
+          <article class="panel"><h2>推理强度 Token 占比</h2><div id="efforts"></div></article>
+        </aside>
+      </section>
+    </section>
+    <section id="eff" class="hidden">
+      <section class="cards" id="effCards"></section>
+      <section class="layout">
+        <article class="panel pref-dist">
+          <h2>单次请求完成时长分布</h2>
+          <div class="dist" id="dist"></div>
+          <p class="note">含思考、生成、工具执行与等待；非完整会话时长，也非纯模型推理时长。</p>
+          <p class="note" id="durationSamples"></p>
+        </article>
+        <aside class="side">
+          <article class="panel"><h2>请求状态</h2><div class="statuses" id="status"></div></article>
+          <article class="panel pref-compact"><h2>上下文压缩</h2><div id="compaction"></div></article>
+        </aside>
+      </section>
+      <section class="layout">
+        <article class="panel">
+          <h2>每日请求量</h2>
+          <p class="note">按请求开始日期计入，包含完成、报错与未完成请求；缺失开始事件时使用已知事件日期。</p>
+          <div class="trend" id="taskTrend"></div>
+          <div class="axis"><span id="taskFirst"></span><span id="taskLast"></span></div>
+        </article>
+        <article class="panel">
+          <h2>时长口径</h2>
+          <p class="note"><b>首响时间</b>衡量本轮开始后首个 Token 到达的等待感。</p>
+          <p class="note"><b>完成时长</b>存在长尾，展示 P50、P90 与分布，不显示平均值。</p>
+          <p class="note">时长统计仅纳入成功完成且具备对应有效时长的请求。缺失值不计为零，首响与完成时长样本数可能不同。</p>
+        </article>
+      </section>
+    </section>
+    <section id="skill" class="hidden" aria-label="Skill 说明读取统计">
+      <article class="panel skill-panel skill-intro">
+        <div class="skill-heading"><h2>Skill 说明读取</h2><button class="btn" id="skillExport" disabled>导出审计快照</button></div>
+        <p class="note skill-proxy-note">可观测代理指标：只记录实际工具命令中可识别的 SKILL.md 内容读取，不代表实际调用或任务成功。</p>
+        <p class="note" id="skillRange"></p>
+        <details class="skill-method"><summary>口径与审计边界</summary>
+          <p class="note">记录的是可识别的读取命令，未核验文件实际读取成功。</p>
+          <p class="note">仅统计主任务（会话），排除 guardian 与子代理，活动与归档日志去重。总览的轮次与任务跨 Skill 取并集；Skill × 轮次按每项 Skill 分别计，同轮跨日不重复计入区间总览。</p>
+          <p class="note">清单仅包含历史观测过的 Skill，不是完整安装清单。观察项只是复核线索，不代表质量判断，也不构成停用或删除建议。同名多处按去掉插件前缀后的名称比对，可能是有意保留的不同 Skill。</p>
+          <p class="note">日期按 Asia/Shanghai，含首尾。快捷范围随快照截至日推进，自定义日期保持固定；与 Token 筛选独立。清单、同名线索和最近观测均截止所选结束日。</p>
+          <p class="note">来源按说明文件位置区分个人、工作区、系统、插件或未知。未识别的读取方式、已缓存说明的复用不会计入。导出仅含当前筛选的汇总，不含会话正文、路径、任务或轮次标识。</p>
+        </details>
+        <p class="note hidden" id="skillLegacyNotice"></p>
+        <p class="note" id="skillExportState" role="status" aria-live="polite"></p>
+      </article>
+      <section class="filters skill-filters" id="skillFilters" aria-label="Skill 独立筛选">
+        <label class="control">日期范围<select id="skillPreset"><option value="today">今天</option><option value="days7">近 7 天</option><option value="days30" selected>近 30 天</option><option value="month">本月</option><option value="all">全部历史</option><option value="custom">自定义</option></select></label>
+        <label class="control">开始日期<input id="skillStart" type="date"></label>
+        <label class="control">结束日期<input id="skillEnd" type="date"></label>
+        <label class="control skill-search">名称或简介<input id="skillSearch" type="search" placeholder="搜索 Skill 名称或简介" maxlength="160"></label>
+        <label class="control">清单范围<select id="skillScope"><option value="history">历史观测</option><option value="inventory">当前目录</option><option value="combined">当前与历史</option></select></label>
+        <label class="control">用途分类<select id="skillCategory"><option value="all">全部用途</option></select></label>
+        <label class="control">来源<select id="skillSource"><option value="all">全部来源</option><option value="personal">个人</option><option value="workspace">工作区</option><option value="system">系统</option><option value="plugin">插件</option><option value="unknown">未知</option></select></label>
+        <label class="control">观察项<select id="skillObservation"><option value="all">全部观察项</option><option value="active">本期有读取</option><option value="unobserved">本期未观测（历史曾见）</option><option value="currentUnread">当前有定义、本期未观测</option><option value="notFound">当前未找到定义</option><option value="ambiguous">定义冲突</option><option value="single">本期仅 1 轮</option><option value="unknown">来源待确认</option><option value="duplicate">同名多处</option></select></label>
+        <label class="control">排序<select id="skillSort"><option value="reads">读取轮次：多到少</option><option value="readsAsc">读取轮次：少到多</option><option value="tasks">主任务数：多到少</option><option value="recent">最近观测：新到旧</option><option value="name">名称</option></select></label>
+        <button class="btn" id="skillReset">重置筛选</button>
+        <p class="hint skill-filter-message" id="skillFilterMessage" role="status"></p>
+      </section>
+      <section class="cards skill-cards hidden" id="skillCards" aria-label="当前筛选 Skill 总览"></section>
+      <section class="layout skill-charts hidden" id="skillCharts">
+        <article class="panel" id="skillTrendPanel">
+          <div class="skill-trend-heading"><h2>每日读取轮次</h2><span class="note">单位：轮</span></div>
+          <div class="skill-chart-frame"><div class="skill-y-axis" id="skillYAxis" aria-hidden="true"></div><div class="skill-plot"><div class="skill-grid" id="skillGrid" aria-hidden="true"></div><div class="trend" id="skillTrend" role="group" aria-label="每日读取轮次，选择日期查看数量"></div></div></div>
+          <div class="axis skill-date-axis"><span id="skillFirst"></span><span id="skillLast"></span></div>
+          <div class="skill-trend-readout" id="skillTrendReadout" role="status" aria-live="polite"></div>
+          <div class="skill-day-tools"><button class="btn" id="skillDayPrev" type="button" aria-label="查看前一天">←</button><label class="control">查看日期<input id="skillInspectDate" type="date"></label><button class="btn" id="skillDayNext" type="button" aria-label="查看后一天">→</button><span class="note">悬停、聚焦或点按图表查看；也可逐日选择。</span></div>
+          <p class="note" id="skillTrendNote"></p>
+        </article>
+        <article class="panel"><h2>来源分布</h2><p class="note">单位：本期有记录的 Skill 数，按当前筛选统计。</p><div id="skillSources"></div></article>
+      </section>
+      <article class="panel skill-panel">
+        <h2>Skill 清单</h2>
+        <p class="note" id="skillMetadataNote"></p>
+        <div class="skill-table-wrap hidden" id="skillTable">
+          <table class="skill-table">
+            <caption id="skillSummary"></caption>
+            <thead id="skillTableHead">
+              <tr><th scope="col" rowspan="2">Skill</th><th scope="col" rowspan="2">来源</th><th scope="colgroup" colspan="2">近 7 天</th><th scope="colgroup" colspan="2">近 30 天</th></tr>
+              <tr><th scope="col">读取轮次</th><th scope="col">涉及任务（会话）</th><th scope="col">读取轮次</th><th scope="col">涉及任务（会话）</th></tr>
+            </thead>
+            <tbody id="skillRows"></tbody>
+          </table>
+        </div>
+        <p class="skill-empty note" id="skillEmpty" role="status"></p>
+      </article>
+      <article class="panel skill-panel" id="skillComposer">
+        <h2>任务组合与口令草稿</h2>
+        <p class="note">选择当前目录中说明明确的 Skill，填写任务后复制草稿。草稿留在页面，不执行任务；命名组合仅保存在当前浏览器，同名更新，最多 20 组。</p>
+        <label class="control">预设组合<select id="skillWorkflow"><option value="">手动选择</option></select></label>
+        <div id="skillChoices" class="skill-choices"></div>
+        <label class="control">组合名称<input id="skillBundleName" type="text" maxlength="48" placeholder="为这组 Skill 命名"></label>
+        <button class="btn" id="skillBundleSave" type="button">保存命名组合</button>
+        <label class="control">已存组合<select id="skillBundles"><option value="">选择已存组合</option></select></label>
+        <button class="btn" id="skillBundleDelete" type="button" disabled>删除所选组合</button>
+        <label class="control">任务描述<textarea id="skillTask" rows="3" maxlength="2000" placeholder="只在当前页面填写任务，不会随组合保存"></textarea></label>
+        <label class="control">草稿预览<textarea id="skillPromptPreview" rows="6" readonly aria-label="任务口令草稿预览"></textarea></label>
+        <button class="btn primary" id="skillCopyPrompt" type="button" disabled>复制任务口令草稿</button>
+        <p class="note" id="skillComposerState" role="status" aria-live="polite"></p>
+      </article>
+    </section>
+    <div class="info-modal-backdrop hidden" id="infoModal">
+      <section class="info-modal" role="dialog" aria-modal="true" aria-label="统计说明">
+        <button type="button" class="info-close">关闭</button>
+        <h2>统计说明</h2>
+        <h3>数据来源与范围</h3>
+        <ul>
+          <li>仅扫描本机 Codex 的会话与归档会话 JSONL。</li>
+          <li>原始 JSONL 始终只读，不上传数据。</li>
+          <li>Token 与请求日期按 Asia/Shanghai 归属。首次打开默认显示当前统计月；可切换全部或选择历史日期。日期、模型与推理强度筛选共同作用于 Token 总览和请求与效率。</li>
+          <li>预设日期范围随快照截至日推进；本月指自然月初至截至日。手动改日期会切到自定义，并在重载和自动更新后保留。</li>
+        </ul>
+        <h3>刷新机制</h3>
+        <ul>
+          <li>刷新按源文件长度和最后修改时间复用本地缓存，新增或修改的文件才重新解析。</li>
+          <li>页面数据通过本地接口异步加载；后台刷新完成后，已打开页面会自动检测并更新。</li>
+          <li>刷新期间继续展示上一版完整数据；仅在新版数据加载成功后显示刷新完成。</li>
+          <li>当前后台维护每分钟检查、每小时汇总，页面每 30 秒检查新版本。增量缓存按文件工作：仍枚举文件信息，仅读取有变化的源文件。</li>
+        </ul>
+        <p id="cacheInfo"></p>
+        <h3>计算方式</h3>
+        <ul>
+          <li>Total = Input + Output；Fresh Input = Input − Cached Input。</li>
+          <li>Cache、Fresh、Output 互斥；Reasoning 属于 Output，不重复计入 Total。</li>
+          <li>请求按会话与 Turn 合并；每日请求量包含已完成、报错和未完成请求。</li>
+          <li>请求有开始日期时按开始日期归属；完成时长包含思考、生成、工具执行与等待。</li>
+          <li>首响和完成时长分别排除缺失值；百分位取排序后位置 floor((n − 1) × p) 对应的样本。</li>
+        </ul>
+        <h3>Skill 说明读取</h3>
+        <ul>
+          <li>这是可观测代理指标，不代表 Skill 实际调用或任务成功；可用 Skill 清单和对话中提及名称均不计入。</li>
+          <li>按会话、轮次与 Skill 去重，仅统计主任务（会话），排除 guardian 和子代理，活动与归档日志不重复计数。</li>
+          <li>Skill 日期按 Asia/Shanghai，含首尾，与 Token 筛选独立。近 7 天、近 30 天、本月和全部历史随快照更新，自定义日期保持固定。</li>
+          <li>读取轮次是一项 Skill 被读取的轮次数；涉及任务（会话）是读取过该 Skill 的不同主会话数。</li>
+          <li>总览跨 Skill 合并轮次与主任务；Skill × 轮次按每项 Skill 分别计。观测清单不是完整安装清单，观察项只用于人工复核。</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+  <script>//__SKILL_DESCRIPTIONS_ZH__</script>
+  <script>//__DASHBOARD_JS__</script>
+</body>
+</html>

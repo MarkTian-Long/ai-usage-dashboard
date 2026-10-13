@@ -1,0 +1,4 @@
+{"timestamp":"2026-09-27T04:00:00Z","type":"session_meta","payload":{"id":"skill-thread-child","thread_source":"subagent"}}
+{"timestamp":"2026-09-27T04:00:00Z","type":"turn_context","payload":{"turn_id":"excluded-turn"}}
+{"timestamp":"2026-09-27T04:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"synthetic-call","arguments":"{\"cmd\":\"cat 'C:/Users/fixture-private-username/.codex/skills/excluded-08-thread-subagent/SKILL.md'\"}"}}
+{"timestamp":"2026-09-27T04:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":2,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":3},"total_token_usage":{"input_tokens":2,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":3}}}}
