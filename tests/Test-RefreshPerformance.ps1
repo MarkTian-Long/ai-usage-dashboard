@@ -222,6 +222,14 @@ function Test-IdentityHelper {
     }
   }
   $script:scenarios.Add([ordered]@{ name = 'identity-helper-equivalence'; passed = $true; variants = $results.Count })
+  $jsonType=(Get-Command ConvertTo-Json).ImplementingType.Assembly.GetType('Microsoft.PowerShell.Commands.JsonObject')
+  $null=$helper.GetMethod('ConfigureIdentitySerializer').Invoke($null,@(($PSVersionTable.PSVersion.Major -le 5),$jsonType))
+  $identityMethod=$helper.GetMethod('EventIdentity',[Reflection.BindingFlags]'NonPublic,Static')
+  foreach($value in @($false,$true,[long]9007199254740991,[decimal]1.00,[double]1,[double]1.25,[double]1e-20,[double]1e20,([double](-1)*0))) {
+    $fields=$base.Clone();$fields[10]=$value
+    $args=[object[]]::new(2);$args[0]=$fields;$args[1]={param($parts) 'J'+($parts|ConvertTo-Json -Compress)}
+    Check 'native scalar JSON preserves host null and numeric serialization' ($identityMethod.Invoke($null,$args)) ('J'+($fields|ConvertTo-Json -Compress))
+  }
   Test-AddSourceHelper $helper
   Test-ReleaseCoveredRecordsHelper $helper
 }

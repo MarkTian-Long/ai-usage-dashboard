@@ -2,4 +2,8 @@
     # Optional. When omitted, the dashboard uses CODEX_HOME or $HOME/.codex.
     # Set this when the scheduled task runs under a different Windows account.
     SourceRoot = 'C:\\path\\to\\.codex'
+    # Optional local executable for both the service and refresh process.
+    # Useful when scheduled tasks do not inherit a terminal's PowerShell 7 PATH.
+    # Missing paths fall back to pwsh on PATH, then Windows PowerShell.
+    PowerShellPath = ''
 }

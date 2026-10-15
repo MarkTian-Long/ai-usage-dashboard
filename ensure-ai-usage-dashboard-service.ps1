@@ -8,6 +8,11 @@ $root=$PSScriptRoot
 $serviceScript=Join-Path $root 'start-ai-usage-dashboard-service.ps1'
 $pwsh=Get-Command pwsh -ErrorAction SilentlyContinue
 $shell=if($pwsh){$pwsh.Source}else{'powershell.exe'}
+$localConfig=Join-Path $root 'codex-usage-dashboard.local.psd1'
+if(Test-Path -LiteralPath $localConfig){
+  $configuredShell=[string](Import-PowerShellDataFile -LiteralPath $localConfig).PowerShellPath
+  if($configuredShell -and [IO.Path]::IsPathRooted($configuredShell) -and $configuredShell -notmatch '^(?:\\\\|//)' -and (Split-Path -Leaf $configuredShell) -in 'pwsh.exe','powershell.exe' -and (Test-Path -LiteralPath $configuredShell -PathType Leaf)){$shell=$configuredShell}
+}
 function Test-Listening {
   $client=$null
   try {

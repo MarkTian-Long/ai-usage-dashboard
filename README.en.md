@@ -2,7 +2,7 @@
 
 [中文](README.md) | [English](README.en.md)
 
-An AI usage dashboard currently using Codex as its data source. It scans local Codex JSONL files read-only on Windows and displays tokens, tasks, compaction statistics, and Skill instruction reads at `http://127.0.0.1:8765/`. Skill metrics identify commands that read `SKILL.md` in tool calls; they do not prove actual Skill invocation or task success. The application does not read authentication files or upload data, and does not save or display conversation text, full tool arguments, tool output, usernames, or absolute local paths.
+An AI usage dashboard currently using Codex as its data source. It scans local Codex JSONL files read-only on Windows and displays tokens, tasks, compaction statistics, and Skill instruction reads at `http://127.0.0.1:8765/`. Skill metrics identify commands that read `SKILL.md` in tool calls; they do not prove actual Skill invocation or task success. The application does not read authentication files or upload data, and does not save or display conversation text, full tool arguments, or tool output. Usernames and absolute local paths are not stored in plaintext or displayed. Resume context, including the working directory, is stored only locally under the current Windows user's DPAPI encryption.
 
 This is the English repository overview. The dashboard interface and linked detailed guides are currently primarily in Chinese.
 
@@ -30,6 +30,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-ai-usage-dashboard-s
 ```
 
 Open `http://127.0.0.1:8765/` in a browser. The service listens only on IPv4 loopback. Manual refresh uses `POST /api/refresh` with `X-Codex-Dashboard: 1`.
+
+If PowerShell 7 is already available, set the local configuration's `PowerShellPath` to its local `pwsh.exe`. Maintenance and refresh then use the same runtime even when scheduled tasks inherit an older PATH. An empty or unavailable path falls back to `pwsh` on PATH, then Windows PowerShell. The project does not install a runtime. Measure refresh from the button click until the new data is visible; warm-cache performance does not guarantee a 20-second limit for large changes or migrations.
 
 ## Optional automatic maintenance
 
@@ -59,7 +61,7 @@ This explicit recovery entry imports only caches compatible with the current ver
 
 `.codex-usage-dashboard-cache/` accelerates refresh; HTML and data JSON can be regenerated. After original logs move, `.codex-usage-dashboard-history/` may be the only remaining copy of statistical events. Include it in private local backups and do not treat it as disposable cache. History uses immutable event blocks and a successfully committed manifest. A failed refresh does not overwrite committed history; old blocks are not automatically cleaned up. It is not a backup of original Codex chats. A machine first installed after historical logs migrated cannot reconstruct missing usage from this project's code alone without compatible caches.
 
-Refresh reuses extracted caches per file and rereads changed files in full. Structural events are strictly validated, deduplicated, and aggregated each run. When unchanged-source cache contents, history blocks, file signatures, and parser fingerprints agree and history integrity checks pass, blocks are reused to reduce serialization. Validation and event merging use in-memory .NET helper code. Before sorting, redundant per-request records already covered by consumption records and temporary indexes are released, while per-thread grouping and checks for supplementary old-record usage remain. This adds no installation or background task and does not change statistical definitions or cache version. See [refresh cost](docs/skill-read-metrics.md#刷新成本频率与数据增长) for phase timings and history-write reuse.
+Refresh reuses extracted caches per file. For append-only UTF-8 logs, it parses the new tail only after validating the complete old prefix, cached events, and resume state. Truncation, rewrites, unavailable state, or unsupported encoding fall back to a full read. Resume context is encrypted for the current local user and can be rebuilt. Structural events are still strictly validated, deduplicated, and aggregated every run; retained history still receives integrity checks. In-memory .NET helpers handle validation, event merging, and token/task aggregation, while compact records and release of covered records reduce memory use. This adds no installation or background task and does not change statistical definitions or the event cache version. See [refresh cost](docs/skill-read-metrics.md#刷新成本频率与数据增长) for parsing volume, prefix verification, and phase timings.
 
 ## Skill instruction reads
 

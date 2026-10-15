@@ -146,14 +146,14 @@ function harness({ local = '{invalid', session = '{}', storageThrows = false, tr
     return { getItem() { if (storageThrows) throw Error('storage disabled'); return value; },
       setItem(key, next) { if (storageThrows) throw Error('storage disabled'); value = next; } };
   }
-  const timers = [], calls = [];
+  const timers = [], timerDelays = [], calls = [];
   let api = () => { throw Error('Unexpected fetch'); };
   const context = vm.createContext({ document, window: { localStorage: storage(local), sessionStorage: storage(session) },
-    console, Date, setTimeout: callback => timers.push(callback), setInterval: () => {},
+    console, Date, setTimeout: (callback, milliseconds) => { timerDelays.push(milliseconds); return timers.push(callback); }, setInterval: () => {},
     fetch: async (url, options) => { calls.push({ url, options }); return api(url, options); } });
   vm.runInContext(translations === undefined ? translationScript : 'const SKILL_DESCRIPTION_ZH = ' + JSON.stringify(translations) + ';', context);
   vm.runInContext(script, context);
-  return { elements, tabs, timers, calls, events, run: code => vm.runInContext(code, context),
+  return { elements, tabs, timers, timerDelays, calls, events, run: code => vm.runInContext(code, context),
     api(handler) { api = handler; }, tick() { const next = timers.shift(); assert.ok(next, 'a poll is pending'); next(); },
     focus: () => focused, data: value => { context.synthetic = value; } };
 }
@@ -364,6 +364,60 @@ async function test(name, action) { await action(); console.log('PASS ' + name);
     h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: ++statusReads === 1 ? 'v1' : 'v2' } : fixture()));
     await assert.rejects(h.run('loadData()'), /版本变化/);
     assert.equal(h.run('D.usage.length'), 0); assert.equal(h.run('lastUpdated'), '');
+  });
+  await test('manual refresh polls at 250ms and reuses its ready status while retaining the post-data version check', async () => {
+    const h = harness(); let state = { status: 'ready', updated: 'old' };
+    h.api((url, options) => {
+      if (options?.method === 'POST') { state = { status: 'refreshing', updated: 'old' }; return reply({}); }
+      return reply(url.startsWith('/api/status') ? state : fixture());
+    });
+    await h.run('loadData()');
+    const pending = h.run('manualRefresh()'); await flush();
+    assert.equal(h.timerDelays.at(-1), 250);
+    const beforeCompletion = h.calls.length;
+    state = { status: 'ready', updated: 'new' }; h.tick(); await pending;
+    assert.deepEqual(h.calls.slice(beforeCompletion).map(call => call.url.split('?')[0]), ['/api/status', '/api/data', '/api/status']);
+    assert.equal(h.run('lastUpdated'), 'new'); assert.equal(h.elements.get('#state').textContent, '刷新完成');
+  });
+  await test('one transient status failure keeps manual refresh busy and reconnects without submitting again', async () => {
+    const h = harness(); let started = false, failures = 1, posts = 0;
+    h.api((url, options) => {
+      if (options?.method === 'POST') { started = true; posts++; return reply({}); }
+      if (url.startsWith('/api/status')) return started && failures-- > 0 ? reply({}, 503) : reply({ status: 'ready', updated: started ? 'new' : 'old' });
+      return reply(fixture());
+    });
+    await h.run('loadData()'); const prior = h.elements.get('#tokenCards').innerHTML;
+    const pending = h.run('manualRefresh()'); await flush();
+    assert.equal(h.elements.get('#refresh').disabled, true); assert.match(h.elements.get('#state').textContent, /正在重连/);
+    assert.equal(h.run('lastUpdated'), 'old'); assert.equal(h.elements.get('#tokenCards').innerHTML, prior);
+    h.tick(); await pending;
+    assert.equal(posts, 1); assert.equal(h.run('lastUpdated'), 'new'); assert.equal(h.elements.get('#state').textContent, '刷新完成');
+  });
+  await test('persistent status failures stop after bounded retries and preserve the previous snapshot', async () => {
+    const h = harness(); let started = false, posts = 0;
+    h.api((url, options) => {
+      if (options?.method === 'POST') { started = true; posts++; return reply({}); }
+      return url.startsWith('/api/status') ? started ? reply({}, 503) : reply({ status: 'ready', updated: 'old' }) : reply(fixture());
+    });
+    await h.run('loadData()'); const prior = h.elements.get('#tokenCards').innerHTML;
+    const pending = h.run('manualRefresh()'); await flush();
+    h.tick(); await flush(); h.tick(); await pending;
+    assert.equal(posts, 1); assert.equal(h.elements.get('#refresh').disabled, false);
+    assert.match(h.elements.get('#state').textContent, /刷新失败.*503.*保留已加载数据/);
+    assert.equal(h.run('lastUpdated'), 'old'); assert.equal(h.elements.get('#tokenCards').innerHTML, prior);
+  });
+  await test('a version change after a reused ready status still rejects the new data before commit', async () => {
+    const h = harness(); let state = { status: 'ready', updated: 'old' }, started = false;
+    h.api((url, options) => {
+      if (options?.method === 'POST') { started = true; state = { status: 'ready', updated: 'new' }; return reply({}); }
+      if (url.startsWith('/api/status')) return reply(state);
+      if (started) state = { status: 'ready', updated: 'newer' };
+      return reply(fixture());
+    });
+    await h.run('loadData()'); const prior = h.elements.get('#tokenCards').innerHTML;
+    await h.run('manualRefresh()');
+    assert.match(h.elements.get('#state').textContent, /读取期间数据版本变化/);
+    assert.equal(h.run('lastUpdated'), 'old'); assert.equal(h.elements.get('#tokenCards').innerHTML, prior);
   });
   await test('task view separates large guardian totals while ordinary subagents remain included', async () => {
     const h = harness();
@@ -806,8 +860,20 @@ async function test(name, action) { await action(); console.log('PASS ' + name);
     data.refresh.sourceBytesRead = 1048576; data.refresh.elapsedMs = 12500;
     h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : data));
     await h.run('loadData()');
-    assert.match(h.elements.get('#cacheInfo').textContent, /本次重解析文件体积 1.0 MiB（按文件大小估算）/);
+    assert.match(h.elements.get('#cacheInfo').textContent, /本次需处理源文件体积 1.0 MiB（按文件大小估算）/);
     assert.match(h.elements.get('#cacheInfo').textContent, /汇总阶段耗时 12.5 秒/);
+  });
+  await test('append diagnostics distinguish parsed bytes from prefix verification and tolerate older snapshots', async () => {
+    const h = harness(); let data = fixture();
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : data));
+    await h.run('loadData()'); assert.doesNotMatch(h.elements.get('#cacheInfo').textContent, /按追加内容更新/);
+    data.refresh.appended = 2; data.refresh.parsedBytes = 1024; data.refresh.prefixBytesVerified = 1048576;
+    await h.run('loadData()');
+    assert.match(h.elements.get('#cacheInfo').textContent, /2 个文件按追加内容更新；实际解析 1.0 KiB，旧内容完整性校验 1.0 MiB/);
+    for (const value of [-1, '2', false, NaN, Infinity]) {
+      data.refresh.appended = value; await h.run('loadData()');
+      assert.doesNotMatch(h.elements.get('#cacheInfo').textContent, /按追加内容更新/);
+    }
   });
   await test('retained history is disclosed beside filters and expands a saved all-history range to August after update', async () => {
     const h = harness({ session: JSON.stringify({ rangePreset: 'all', usageScope: 'task', model: 'a', effort: 'high', metric: 'cached', page: 'eff' }) });

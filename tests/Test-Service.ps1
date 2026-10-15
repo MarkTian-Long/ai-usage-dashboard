@@ -2,6 +2,8 @@
 param(
   [string]$ServiceScript='',
   [string]$ServiceHost='pwsh',
+  [string]$RefreshHost='',
+  [switch]$BelowNormalLaunch,
   [switch]$UseDefaultRoot,
   [string]$TestOutputRoot=(Join-Path ([IO.Path]::GetTempPath()) 'codex-dashboard-service-tests')
 )
@@ -13,6 +15,8 @@ New-Item -ItemType Directory -Path $fixture -Force|Out-Null
 $serviceProcess=$null
 $sockets=[Collections.Generic.List[Net.Sockets.TcpClient]]::new()
 $results=[Collections.Generic.List[object]]::new()
+$performance=[ordered]@{}
+$refreshStatusMaxMs=0
 function Assert-Test([bool]$Condition,[string]$Name) {
   $results.Add([pscustomobject]@{name=$Name;passed=$Condition})
   if(-not $Condition){throw ('Assertion failed: '+$Name)}
@@ -29,7 +33,9 @@ function Invoke-Http([string]$Uri,[string]$Method='GET',[hashtable]$Headers=$nul
 }
 function Wait-Refresh {
   for($i=0;$i -lt 100;$i++) {
+    $statusWatch=[Diagnostics.Stopwatch]::StartNew()
     $state=Read-Status
+    $statusWatch.Stop();$script:refreshStatusMaxMs=[Math]::Max($script:refreshStatusMaxMs,$statusWatch.ElapsedMilliseconds)
     if($state.status -ne 'refreshing'){return $state}
     Start-Sleep -Milliseconds 50
   }
@@ -48,31 +54,52 @@ try {
   $mock=@'
 $ErrorActionPreference='Stop'
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'refresh-child.pid'),[string]$PID)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'refresh-engine.txt'),(Get-Process -Id $PID).Path)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'refresh-priority.txt'),[string](Get-Process -Id $PID).PriorityClass)
 $mode=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'mode.txt'))
 Start-Sleep -Milliseconds 650
 if($mode -eq 'nochange'){exit 0}
 $data=Join-Path $PSScriptRoot 'codex-usage-dashboard-data.json'
 if($mode -eq 'invalid'){[IO.File]::WriteAllText($data,'not json');exit 0}
+if($mode -eq 'large'){
+  $rows=('{"date":"2026-10-15","model":"synthetic-model","total":123456},'*12000).TrimEnd(',')
+  [IO.File]::WriteAllText($data,('{"synthetic":true,"version":"large","rows":['+$rows+']}'))
+  exit 0
+}
 [IO.File]::WriteAllText($data,('{"synthetic":true,"version":"'+$mode+'"}'))
 if($mode -eq 'fail'){exit 7}
 exit 0
 '@
   [IO.File]::WriteAllText((Join-Path $fixture 'refresh-ai-usage-dashboard.ps1'),$mock)
   $shell=(Get-Command $ServiceHost -ErrorAction Stop).Source
+  $expectedRefreshShell=$null
+  if($RefreshHost){
+    $expectedRefreshShell=(Get-Command $RefreshHost -ErrorAction Stop).Source
+    $settings="@{ SourceRoot = ''; PowerShellPath = '"+$expectedRefreshShell.Replace("'","''")+"' }"
+    [IO.File]::WriteAllText((Join-Path $fixture 'codex-usage-dashboard.local.psd1'),$settings,[Text.UTF8Encoding]::new($false))
+  }
   $launchScript=$ServiceScript
   if($UseDefaultRoot){
     $launchScript=Join-Path $fixture 'isolated-service.ps1'
     Copy-Item -LiteralPath $ServiceScript -Destination $launchScript
   }
+  if($BelowNormalLaunch){
+    $targetScript=$launchScript
+    $launchScript=Join-Path $fixture 'below-normal-launch.ps1'
+    $wrapper="param(`$Port,`$Root,`$RequestTimeoutMs,`$MaxHeaderBytes)`n[Diagnostics.Process]::GetCurrentProcess().PriorityClass='BelowNormal'`n& '"+$targetScript.Replace("'","''")+"' @PSBoundParameters"
+    [IO.File]::WriteAllText($launchScript,$wrapper,[Text.UTF8Encoding]::new($true))
+  }
   $serviceArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$launchScript+'"'),'-Port',$port,'-RequestTimeoutMs',400,'-MaxHeaderBytes',1024)
   if(-not $UseDefaultRoot){$serviceArguments+=@('-Root',('"'+$fixture+'"'))}
   $serviceProcess=Start-Process -FilePath $shell -ArgumentList $serviceArguments -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $fixture 'stdout.log') -RedirectStandardError (Join-Path $fixture 'stderr.log')
   $null=$serviceProcess.Handle
-  $initial=$null
+  $initial=$null;$startupError=''
   for($i=0;$i -lt 30;$i++) {
-    try {$initial=Read-Status;break} catch {if($serviceProcess.HasExited){throw ('Synthetic service exited before startup: '+[IO.File]::ReadAllText((Join-Path $fixture 'stderr.log')))};Start-Sleep -Milliseconds 100}
+    try {$initial=Read-Status;break} catch {$startupError=[string]$_;if($serviceProcess.HasExited){throw ('Synthetic service exited before startup: '+[IO.File]::ReadAllText((Join-Path $fixture 'stderr.log')))};Start-Sleep -Milliseconds 100}
   }
+  if($null -eq $initial){throw ('Synthetic service did not answer: '+$startupError)}
   Assert-Test ($null -ne $initial -and $initial.status -eq 'ready') 'Existing valid snapshot starts ready'
+  if($BelowNormalLaunch){Assert-Test ((Get-Process -Id $serviceProcess.Id).PriorityClass -eq 'Normal') 'A scheduled BelowNormal launcher does not leave the HTTP service below normal priority'}
   Assert-Test ((Invoke-Http -Uri ($url+'/')).StatusCode -eq 200) 'Dashboard route remains available'
   $unauthorized=Invoke-Http -Uri ($url+'/api/refresh') -Method Post
   Assert-Test ($unauthorized.StatusCode -eq 405) 'Refresh still requires the dashboard header'
@@ -81,6 +108,8 @@ exit 0
   Assert-Test ((Request-Refresh).StatusCode -eq 202) 'Refresh is accepted'
   Assert-Test ((Request-Refresh).StatusCode -eq 409) 'Concurrent refresh returns busy'
   $failed=Wait-Refresh
+  if($expectedRefreshShell){Assert-Test ([StringComparer]::OrdinalIgnoreCase.Equals([IO.File]::ReadAllText((Join-Path $fixture 'refresh-engine.txt')),$expectedRefreshShell)) 'The local configuration selects the actual refresh executable'}
+  if($BelowNormalLaunch){Assert-Test ([IO.File]::ReadAllText((Join-Path $fixture 'refresh-priority.txt')) -eq 'Normal') 'Refresh children inherit ordinary priority from the HTTP service'}
   Assert-Test ($failed.status -eq 'failed' -and $failed.exitCode -eq 7 -and $failed.lastError) 'Nonzero refresh exit reports failure'
   Assert-Test ($failed.updated -eq $initial.updated) 'Failure preserves committed version'
   $data=Invoke-RestMethod -Uri ($url+'/api/data') -TimeoutSec 3
@@ -103,6 +132,38 @@ exit 0
   $data=Invoke-RestMethod -Uri ($url+'/api/data') -TimeoutSec 3
   Assert-Test ($data.version -eq 'success') 'Successful snapshot becomes visible'
 
+  [IO.File]::WriteAllText((Join-Path $fixture 'mode.txt'),'large')
+  $refreshStatusMaxMs=0
+  Request-Refresh|Out-Null
+  $largeReady=Wait-Refresh
+  Assert-Test ($largeReady.status -eq 'ready' -and $largeReady.updated -ne $success.updated) 'A large valid JSON snapshot advances atomically'
+  $transferWatch=[Diagnostics.Stopwatch]::StartNew()
+  $largeResponse=Invoke-WebRequest -Uri ($url+'/api/data') -TimeoutSec 10 -UseBasicParsing
+  $transferWatch.Stop()
+  $largeData=ConvertFrom-Json -InputObject $largeResponse.Content
+  Assert-Test ($largeData.version -eq 'large' -and @($largeData.rows).Count -eq 12000) 'Large committed data is transmitted completely'
+  $performance.largeSnapshot=[ordered]@{bytes=[Text.Encoding]::UTF8.GetByteCount($largeResponse.Content);maxStatusMs=$refreshStatusMaxMs;dataTransferMs=$transferWatch.ElapsedMilliseconds}
+
+  # Incomplete/speculative sockets must not serialize their deadlines ahead of
+  # a ready browser request. The old one-client loop exceeded the HTTP deadline
+  # after this bounded queue of 400ms header waits.
+  $incomplete=[Collections.Generic.List[Net.Sockets.TcpClient]]::new()
+  for($index=0;$index -lt 12;$index++){
+    $socket=[Net.Sockets.TcpClient]::new();$sockets.Add($socket);$incomplete.Add($socket)
+    $socket.Connect('127.0.0.1',$port);$socket.GetStream().ReadTimeout=3000
+    if($index -gt 0){
+      $prefix=[Text.Encoding]::ASCII.GetBytes("GET /api/status HTTP/1.1`r`nHost: localhost`r`n")
+      $socket.GetStream().Write($prefix,0,$prefix.Length)
+    }
+  }
+  $queueWatch=[Diagnostics.Stopwatch]::StartNew();$responsive=Read-Status;$queueWatch.Stop()
+  Assert-Test ($responsive.status -eq 'ready') 'Ready requests proceed while multiple header deadlines remain pending'
+  foreach($socket in $incomplete){
+    $reader=[IO.StreamReader]::new($socket.GetStream());$line=$reader.ReadLine();$reader.Dispose();$socket.Dispose()
+    Assert-Test ($line -match '^HTTP/1.1 408 ') 'Every incomplete or idle connection retains its total header deadline'
+  }
+  $performance.incompleteQueue=[ordered]@{connections=$incomplete.Count;statusMs=$queueWatch.ElapsedMilliseconds}
+
   $partial=[Net.Sockets.TcpClient]::new();$sockets.Add($partial);$partial.Connect('127.0.0.1',$port)
   $partialStream=$partial.GetStream();$partialStream.ReadTimeout=3000
   $bytes=[Text.Encoding]::ASCII.GetBytes("GET /api/status HTTP/1.1`r`nHost: localhost`r`n")
@@ -120,7 +181,7 @@ exit 0
   Assert-Test ($limitLine -match '^HTTP/1.1 431 ') 'Oversized headers are rejected'
   Assert-Test ((Read-Status).status -eq 'ready') 'Service remains available after the header limit'
   Assert-Test (Test-Path -LiteralPath (Join-Path $fixture 'codex-usage-dashboard-service.log')) 'Controlled local refresh log is written'
-  [ordered]@{passed=$true;serviceHost=$shell;usedDefaultRoot=[bool]$UseDefaultRoot;count=$results.Count;results=$results}|ConvertTo-Json -Depth 4
+  [ordered]@{passed=$true;serviceHost=$shell;usedDefaultRoot=[bool]$UseDefaultRoot;count=$results.Count;performance=$performance;results=$results}|ConvertTo-Json -Depth 5
 } finally {
   foreach($socket in $sockets){$socket.Dispose()}
   if($serviceProcess -and -not $serviceProcess.HasExited){Stop-Process -Id $serviceProcess.Id -Force}

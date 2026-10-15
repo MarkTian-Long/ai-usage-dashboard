@@ -685,7 +685,11 @@ function render() {
     ? '本次源文件缓存：' + D.refresh.reused + ' 个复用，' + D.refresh.reparsed + ' 个重新解析。'
     : '尚无本次刷新缓存信息。';
   if (Number.isSafeInteger(D.refresh?.sourceBytesRead) && D.refresh.sourceBytesRead >= 0) {
-    q('#cacheInfo').textContent += ' 本次重解析文件体积 ' + Bytes(D.refresh.sourceBytesRead) + '（按文件大小估算）。';
+    q('#cacheInfo').textContent += ' 本次需处理源文件体积 ' + Bytes(D.refresh.sourceBytesRead) + '（按文件大小估算）。';
+  }
+  if (['appended', 'parsedBytes', 'prefixBytesVerified'].every(key => Number.isSafeInteger(D.refresh?.[key]) && D.refresh[key] >= 0)) {
+    q('#cacheInfo').textContent += ' 其中 ' + D.refresh.appended + ' 个文件按追加内容更新；实际解析 '
+      + Bytes(D.refresh.parsedBytes) + '，旧内容完整性校验 ' + Bytes(D.refresh.prefixBytesVerified) + '。';
   }
   if (typeof D.refresh?.elapsedMs === 'number' && Number.isFinite(D.refresh.elapsedMs) && D.refresh.elapsedMs >= 0) {
     q('#cacheInfo').textContent += ' 汇总阶段耗时 ' + Sec(D.refresh.elapsedMs / 1000) + '。';
@@ -887,14 +891,14 @@ function validateSkills(skills) {
     }
   }
 }
-async function loadData({ expectedUpdated = '', showState = true } = {}) {
+async function loadData({ expectedUpdated = '', showState = true, knownStatus = null } = {}) {
   if (loadPromise) {
     await loadPromise;
     if (!expectedUpdated || lastUpdated === expectedUpdated) return lastUpdated;
   }
   loadBusy = true;
   loadPromise = (async () => {
-    const before = await status();
+    const before = knownStatus || await status();
     if (expectedUpdated && (before.status !== 'ready' || before.updated !== expectedUpdated)) {
       throw Error('数据版本已变化，等待下一次刷新');
     }
@@ -918,13 +922,20 @@ async function loadData({ expectedUpdated = '', showState = true } = {}) {
   finally { loadBusy = false; loadPromise = null; }
 }
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
-async function waitRefresh(previousUpdated, timeoutMs = 900000, pollMs = 2000) {
+async function waitRefresh(previousUpdated, timeoutMs = 900000, pollMs = 250) {
   const started = Date.now();
+  let statusFailures = 0;
   while (Date.now() - started < timeoutMs) {
-    const state = await status();
+    let state;
+    try { state = await status(); statusFailures = 0; }
+    catch (error) {
+      if (++statusFailures >= 3) throw error;
+      q('#state').textContent = '正在重连本机服务…当前数据继续可用';
+      await delay(pollMs); continue;
+    }
     if (state.status === 'failed') throw Error(serviceFailure(state));
     if (state.status === 'ready' && state.updated && state.updated !== previousUpdated) {
-      await loadData({ expectedUpdated: state.updated, showState: false });
+      await loadData({ expectedUpdated: state.updated, showState: false, knownStatus: state });
       return state.updated;
     }
     q('#state').textContent = state.status === 'refreshing' ? '正在汇总…当前数据继续可用' : '等待新版数据…';

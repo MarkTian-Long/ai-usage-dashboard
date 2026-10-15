@@ -661,7 +661,7 @@ try {
 
   $changedSource = Join-Path $sourceRoot 'sessions\01-main.jsonl'
   [IO.File]::AppendAllText($changedSource, [Environment]::NewLine + '{"type":"synthetic_ignored_event"}' + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
-  Invoke-Generator '08-only-changed-source-reparsed' 2 1 @('sessions\01-main.jsonl') -SkipChangedSourceCacheReads
+  Invoke-Generator '08-only-changed-source-reparsed' 2 1 @('sessions\01-main.jsonl')
 
   $skillSourceRoot = Join-Path $runRoot 'synthetic-skill-codex'
   $skillOutputRoot = Join-Path $runRoot 'skill-generated'
@@ -695,7 +695,7 @@ try {
     }
   }
   [IO.File]::AppendAllText($skillChangedSource, [Environment]::NewLine + (ConvertTo-Json -InputObject $incrementalEvent -Depth 6 -Compress) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
-  Invoke-SkillGenerator '14-skill-incremental-new-read' 10 1 $true -ExpectedReparsedFiles @('sessions\02-second-task.jsonl') -SkipChangedSourceCacheReads
+  Invoke-SkillGenerator '14-skill-incremental-new-read' 10 1 $true -ExpectedReparsedFiles @('sessions\02-second-task.jsonl')
 
   # Same-format caches from an earlier parser cannot be reused after a source edit.
   $manifest = Read-JsonFile $skillManifestPath
