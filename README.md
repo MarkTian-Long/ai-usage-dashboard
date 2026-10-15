@@ -1,5 +1,7 @@
 # AI Usage Dashboard
 
+[中文](README.md) | [English](README.en.md)
+
 AI 使用看板，当前数据来源为 Codex。在 Windows 本地只读扫描 Codex JSONL，在 `http://127.0.0.1:8765/` 展示 Token、任务、压缩统计与 Skill 说明读取。Skill 指标仅从工具调用中识别读取 `SKILL.md` 的命令，不代表实际调用或任务成功。它不读取认证文件、不上传数据，也不保存或显示会话正文、完整工具参数、工具输出、用户名或本机绝对路径。
 
 ## 仓库边界
