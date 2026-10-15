@@ -17,10 +17,195 @@ $manifestPath=Join-Path $cacheDir 'manifest.json'
 $cacheVersion=7
 $tz=[TimeSpan]::FromHours(8)
 $m=New-Object Threading.Mutex($false,$MutexName)
-if(-not $m.WaitOne(300000)){exit 23}
+try {$mutexAcquired=$m.WaitOne(300000)}
+catch [Threading.AbandonedMutexException] {$mutexAcquired=$true}
+if(-not $mutexAcquired){$m.Dispose();exit 23}
 
 try {
   $generationTimer=[Diagnostics.Stopwatch]::StartNew()
+  $phaseTimes=[ordered]@{};$phaseClock=@{ms=0}
+  function MarkPhase([string]$name){
+    $now=$generationTimer.ElapsedMilliseconds
+    $phaseTimes[$name]=$now-$phaseClock.ms;$phaseClock.ms=$now
+  }
+  # Keep the same strict event contract while avoiding a PowerShell interpreter
+  # loop for every field of every retained event. No source JSONL is changed.
+  if(-not ('AiUsageEventOpsV1' -as [type])){
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Management.Automation;
+using System.Text;
+
+public static class AiUsageEventOpsV1 {
+    private static readonly HashSet<string> Kinds = new HashSet<string>(
+        new[] { "token_count", "token_usage_record", "thread_settings_applied", "task_started", "task_complete", "compacted", "context_compacted", "skill_read" }, StringComparer.InvariantCultureIgnoreCase);
+    private static readonly HashSet<string> Sources = new HashSet<string>(
+        new[] { "personal", "workspace", "system", "plugin", "unknown" }, StringComparer.InvariantCultureIgnoreCase);
+    private static readonly string[] Fields = { "mo", "ef", "sc", "turn", "r", "l", "t", "du", "ft", "hf", "er", "w", "skill", "source" };
+    private static object Value(PSObject item, string name) {
+        PSPropertyInfo property = item.Properties[name];
+        return property == null ? null : property.Value;
+    }
+    private static bool Is(object value, string text) {
+        return value is string && String.Equals((string)value, text, StringComparison.InvariantCultureIgnoreCase);
+    }
+    private static bool Text(object value) { return value is string && !String.IsNullOrWhiteSpace((string)value); }
+    private static void Fail(string reason) { throw new InvalidOperationException(reason); }
+    private static double Number(object value, bool integer, bool bounded) {
+        if (value == null || value is bool || value is string) Fail("Invalid stored numeric value");
+        double number = LanguagePrimitives.ConvertTo<double>(value);
+        if (Double.IsNaN(number) || Double.IsInfinity(number) || number < 0 ||
+            (bounded && number > 9007199254740991d) || (integer && Math.Floor(number) != number)) Fail("Invalid stored numeric value");
+        return number;
+    }
+    private static double[] Vector(object value) {
+        IEnumerable sequence = value as IEnumerable;
+        if (sequence == null || value is string || value is IDictionary) { Fail("Invalid stored usage vector"); }
+        List<double> numbers = new List<double>(5);
+        foreach (object number in sequence) numbers.Add(Number(number, true, true));
+        if (numbers.Count != 5) Fail("Invalid stored usage vector");
+        return numbers.ToArray();
+    }
+    private static DateTimeOffset Timestamp(object value) {
+        if (value is DateTimeOffset) return (DateTimeOffset)value;
+        if (value is DateTime) return new DateTimeOffset((DateTime)value);
+        return DateTimeOffset.Parse(LanguagePrimitives.ConvertTo<string>(value), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+    }
+    public static List<PSObject> Validate(object[] events) {
+        List<PSObject> result = new List<PSObject>(events.Length);
+        foreach (object raw in events) {
+            if (raw == null) Fail("Invalid stored event");
+            PSObject item = PSObject.AsPSObject(raw);
+            object kind = Value(item, "k"), session = Value(item, "s"), at = Value(item, "a");
+            if (!Text(session) || !(kind is string) || !Kinds.Contains((string)kind) || at == null ||
+                String.IsNullOrEmpty(LanguagePrimitives.ConvertTo<string>(at))) Fail("Invalid stored event");
+            string timestamp = Timestamp(at).ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+            if (Number(Value(item, "i"), true, true) < 1) Fail("Invalid stored event order");
+            object turn = Value(item, "turn");
+            if (item.Properties["turn"] != null && !Text(turn)) Fail("Invalid stored turn");
+            if (Is(kind, "skill_read")) {
+                object source = Value(item, "source");
+                if (!Text(turn) || !Text(Value(item, "skill")) || !(source is string) || !Sources.Contains((string)source)) Fail("Invalid stored skill event");
+            } else if (!Text(Value(item, "mo")) || !Text(Value(item, "ef")) ||
+                       !(Is(Value(item, "sc"), "task") || Is(Value(item, "sc"), "auto_review"))) Fail("Invalid stored attribution");
+            if (Is(kind, "token_count") || Is(kind, "token_usage_record")) {
+                bool response = Is(kind, "token_usage_record");
+                foreach (string name in new[] { "l", "t" }) {
+                    double[] vector = Vector(Value(item, name));
+                    // Legacy cumulative token_count vectors are state markers.
+                    if ((response || name == "l") && (vector[1] > vector[0] || vector[3] > vector[2])) Fail("Invalid stored usage composition");
+                    if (response && vector[4] != vector[0] + vector[2]) Fail("Invalid stored response usage");
+                }
+                if (response) {
+                    string identity = LanguagePrimitives.ConvertTo<string>(Value(item, "r"));
+                    if (identity == null || !System.Text.RegularExpressions.Regex.IsMatch(identity, "^[a-f0-9]{64}$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) Fail("Invalid stored response identity");
+                }
+            }
+            if ((Is(kind, "task_started") || Is(kind, "task_complete")) && !Text(turn)) Fail("Invalid stored turn identity");
+            if (Is(kind, "task_complete")) {
+                foreach (string name in new[] { "du", "ft" }) {
+                    object duration = Value(item, name);
+                    if (duration != null) Number(duration, false, false);
+                }
+                if (!(Value(item, "hf") is bool) || !(Value(item, "er") is bool)) Fail("Invalid stored turn status");
+            }
+            PSObject projected = new PSObject();
+            projected.Properties.Add(new PSNoteProperty("s", session));
+            projected.Properties.Add(new PSNoteProperty("a", timestamp));
+            projected.Properties.Add(new PSNoteProperty("i", Value(item, "i")));
+            projected.Properties.Add(new PSNoteProperty("k", kind));
+            foreach (string name in Fields) {
+                PSPropertyInfo property = item.Properties[name];
+                if (property != null) projected.Properties.Add(new PSNoteProperty(name, property.Value));
+            }
+            result.Add(projected);
+        }
+        return result;
+    }
+    public static string StringIdentity(object[] fields) {
+        // The common token/Skill fields contain only strings and null. Encode
+        // them without delimiter collisions; uncommon typed values use JSON.
+        StringBuilder key = new StringBuilder("S");
+        foreach (object value in fields) {
+            if (value == null) { key.Append('N'); continue; }
+            string text = value as string;
+            if (text == null) return null;
+            key.Append('S').Append(text.Length).Append(':').Append(text);
+        }
+        return key.ToString();
+    }
+    private static string VectorText(object value, string separator, int count) {
+        // PowerShell @($value) treats a scalar string/dictionary/object as one
+        // item. Non-token events may carry these unused legacy l/t fields.
+        if (value == null) return "";
+        IEnumerable sequence = value as IEnumerable;
+        if (sequence == null || value is string || value is IDictionary || value is PSObject)
+            return LanguagePrimitives.ConvertTo<string>(value);
+        StringBuilder text = new StringBuilder();
+        int index = 0;
+        foreach (object number in sequence) {
+            if (index == count) break;
+            if (index++ > 0) text.Append(separator);
+            text.Append(LanguagePrimitives.ConvertTo<string>(number));
+        }
+        return text.ToString();
+    }
+    private static long Consumption(PSObject item) {
+        IList vector = (IList)Value(item, "l");
+        return LanguagePrimitives.ConvertTo<long>(vector[0]) + LanguagePrimitives.ConvertTo<long>(vector[2]);
+    }
+    public static void AddSource(object[] events, bool historical, HashSet<string> identities,
+                                 List<object> all, Hashtable matched, ScriptBlock jsonFallback) {
+        Dictionary<string, PSObject> pending = new Dictionary<string, PSObject>(StringComparer.OrdinalIgnoreCase);
+        foreach (object raw in events) {
+            PSObject item = PSObject.AsPSObject(raw);
+            string session = (string)Value(item, "s");
+            object kind = Value(item, "k");
+            if (Is(kind, "token_usage_record")) pending[session] = item;
+            else if (Is(kind, "task_started") || Is(kind, "task_complete")) pending.Remove(session);
+            else if (Is(kind, "token_count")) {
+                bool proven = false;
+                if (Consumption(item) > 0) {
+                    PSObject candidate;
+                    if (pending.TryGetValue(session, out candidate) &&
+                        String.Equals(LanguagePrimitives.ConvertTo<string>(Value(candidate, "turn")), LanguagePrimitives.ConvertTo<string>(Value(item, "turn")), StringComparison.InvariantCultureIgnoreCase) &&
+                        VectorText(Value(candidate, "l"), "|", 4) == VectorText(Value(item, "l"), "|", 4)) {
+                        proven = true;
+                        matched[LanguagePrimitives.ConvertTo<string>(Value(candidate, "r"))] = true;
+                    }
+                    pending.Remove(session);
+                }
+                PSPropertyInfo property = item.Properties["provenResponse"];
+                if (property == null) item.Properties.Add(new PSNoteProperty("provenResponse", proven));
+                else property.Value = proven;
+            }
+            object last = Value(item, "l"), cumulative = Value(item, "t");
+            object[] fields = { session, Value(item, "a"), kind, Value(item, "mo"), Value(item, "ef"), Value(item, "sc"), Value(item, "turn"), Value(item, "r"),
+                last == null ? "" : VectorText(last, ",", Int32.MaxValue), cumulative == null ? "" : VectorText(cumulative, ",", Int32.MaxValue),
+                Value(item, "du"), Value(item, "ft"), Value(item, "hf"), Value(item, "er"), Value(item, "w"), Value(item, "skill"), Value(item, "source") };
+            string identity = StringIdentity(fields);
+            if (identity == null) identity = LanguagePrimitives.ConvertTo<string>(jsonFallback.InvokeReturnAsIs(new object[] { fields }));
+            bool first = identities.Add(identity);
+            if (!historical || first) all.Add(item);
+        }
+    }
+    public static int ReleaseCoveredRecords(List<object> events, Hashtable matched) {
+        // Every covered record was already skipped by aggregation. Retain one
+        // per thread so even a covered-only group keeps its old session alias.
+        HashSet<string> retainedThreads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return events.RemoveAll(delegate(object raw) {
+            PSObject item = PSObject.AsPSObject(raw);
+            if (!Is(Value(item, "k"), "token_usage_record") ||
+                !matched.ContainsKey(LanguagePrimitives.ConvertTo<string>(Value(item, "r")))) return false;
+            return !retainedThreads.Add(LanguagePrimitives.ConvertTo<string>(Value(item, "s")));
+        });
+    }
+}
+'@
+  }
   function T($o,$n){
     if($null -eq $o){return $null}
     $p=$o.PSObject.Properties[$n]
@@ -551,50 +736,20 @@ try {
   function ReadStoredEvents($stored){
     if($stored.version -ne $cacheVersion -or $stored.parser -notin $compatibleParsers -or
       $null -eq $stored.PSObject.Properties['events'] -or $null -eq $stored.events){throw 'Incompatible stored events'}
-    foreach($event in @($stored.events)){
-      if($null -eq $event -or $event.s -isnot [string] -or [string]::IsNullOrWhiteSpace($event.s) -or -not (T $event a) -or
-        $event.k -notin 'token_count','token_usage_record','thread_settings_applied','task_started','task_complete','compacted','context_compacted','skill_read'){throw 'Invalid stored event'}
-      $at=(ParseTimestamp $event.a).ToUniversalTime().ToString('o')
-      if($null -eq $event.i -or $event.i -is [bool] -or $event.i -is [string] -or [double]$event.i -lt 1 -or
-        [double]$event.i -gt 9007199254740991 -or [Math]::Floor([double]$event.i) -ne [double]$event.i){throw 'Invalid stored event order'}
-      if($null -ne $event.PSObject.Properties['turn'] -and ($event.turn -isnot [string] -or [string]::IsNullOrWhiteSpace($event.turn))){throw 'Invalid stored turn'}
-      if($event.k -eq 'skill_read'){
-        if(-not (T $event turn) -or $event.skill -isnot [string] -or [string]::IsNullOrWhiteSpace($event.skill) -or $event.source -notin 'personal','workspace','system','plugin','unknown'){throw 'Invalid stored skill event'}
-      }elseif($event.mo -isnot [string] -or [string]::IsNullOrWhiteSpace($event.mo) -or
-        $event.ef -isnot [string] -or [string]::IsNullOrWhiteSpace($event.ef) -or $event.sc -notin 'task','auto_review'){throw 'Invalid stored attribution'}
-      if($event.k -in 'token_count','token_usage_record'){
-        if(@($event.l).Count -ne 5 -or @($event.t).Count -ne 5){throw 'Invalid stored usage vector'}
-        foreach($vectorName in 'l','t'){
-          $vector=$event.$vectorName
-          foreach($number in $vector){
-            if($null -eq $number -or $number -is [bool] -or $number -is [string] -or [double]$number -lt 0 -or
-              [double]$number -gt 9007199254740991 -or [double]::IsNaN([double]$number) -or
-              [double]::IsInfinity([double]$number) -or [Math]::Floor([double]$number) -ne [double]$number){throw 'Invalid stored usage values'}
-          }
-          # Legacy cumulative vectors are state markers, not consumption. Their
-          # breakdown can be incomplete; only the last vector contributes usage.
-          if(($event.k -eq 'token_usage_record' -or $vectorName -eq 'l') -and ($vector[1] -gt $vector[0] -or $vector[3] -gt $vector[2])){throw 'Invalid stored usage composition'}
-          if($event.k -eq 'token_usage_record' -and $vector[4] -ne $vector[0]+$vector[2]){throw 'Invalid stored response usage'}
-        }
-        if($event.k -eq 'token_usage_record' -and $event.r -notmatch '^[a-f0-9]{64}$'){throw 'Invalid stored response identity'}
-      }
-      if($event.k -in 'task_started','task_complete' -and -not (T $event turn)){throw 'Invalid stored turn identity'}
-      if($event.k -eq 'task_complete'){
-        foreach($name in 'du','ft'){
-          $value=$event.$name
-          if($null -ne $value -and ($value -is [bool] -or $value -is [string] -or [double]$value -lt 0 -or [double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value))){throw 'Invalid stored duration'}
-        }
-        if($event.hf -isnot [bool] -or $event.er -isnot [bool]){throw 'Invalid stored turn status'}
-      }
-      # Only known structural fields may enter either storage or aggregation.
-      $projected=[ordered]@{s=[string]$event.s;a=$at;i=$event.i;k=[string]$event.k}
-      foreach($name in 'mo','ef','sc','turn','r','l','t','du','ft','hf','er','w','skill','source'){
-        if($null -ne $event.PSObject.Properties[$name]){$projected[$name]=$event.$name}
-      }
-      [pscustomobject]$projected
-    }
+    [AiUsageEventOpsV1]::Validate([object[]]@($stored.events))
   }
-  function SaveHistoryEvents([string]$key,[string]$signature,[object[]]$events){
+  function HistoryCacheProof([string]$key,[string]$signature,[string]$cacheHash,[string]$historyHash){
+    PathKey ($sourceKey+'|'+$parserFingerprint+'|'+$key+'|'+$signature+'|'+$cacheHash+'|'+$historyHash)
+  }
+  function SaveHistoryEvents([string]$key,[string]$signature,[object[]]$events,[string]$cacheHash='',[bool]$canReuse=$false){
+    $previous=$historyEntries[$key]
+    if($canReuse -and $cacheHash -and $previous -and $previous.signature -eq $signature -and $previous.parser -eq $parserFingerprint -and
+      $previous.cacheProof -eq (HistoryCacheProof $key $signature $cacheHash $previous.hash)){
+      $previousPath=Join-Path $historyDir ($previous.hash+'.json')
+      try {
+        if((PathKey ([IO.File]::ReadAllText((DiskPath $previousPath)))) -eq $previous.hash){$historyReuse.files++;return}
+      }catch{} # A missing/corrupt current-source blob is rebuilt below.
+    }
     $json=[ordered]@{schema=1;source=$sourceKey;version=$cacheVersion;parser=$parserFingerprint;events=[object[]]$events}|ConvertTo-Json -Depth 8 -Compress
     $hash=PathKey $json
     # Never replace a blob referenced by the last committed manifest with newer
@@ -603,31 +758,16 @@ try {
     $valid=$false
     if([IO.File]::Exists((DiskPath $path))){try {$valid=(PathKey ([IO.File]::ReadAllText((DiskPath $path)))) -eq $hash}catch{}}
     if(-not $valid){WriteAtomicText $path $json}
-    $historyEntries[$key]=[pscustomobject][ordered]@{key=$key;signature=$signature;parser=$parserFingerprint;hash=$hash}
+    $entry=[ordered]@{key=$key;signature=$signature;parser=$parserFingerprint;hash=$hash}
+    if($cacheHash){$entry.cacheProof=HistoryCacheProof $key $signature $cacheHash $hash}
+    $historyEntries[$key]=[pscustomobject]$entry
   }
   function AddSourceEvents([object[]]$events,[bool]$historical){
-    $pendingResponses=@{}
-    foreach($event in $events){
-      $session=[string]$event.s
-      if($event.k -eq 'token_usage_record'){$pendingResponses[$session]=$event}
-      elseif($event.k -in 'task_started','task_complete'){$pendingResponses.Remove($session)}
-      elseif($event.k -eq 'token_count'){
-        $proven=$false
-        if([int64]$event.l[0]+[int64]$event.l[2] -gt 0){
-          $pending=$pendingResponses[$session]
-          if($pending -and (T $pending turn) -eq (T $event turn) -and (@($pending.l)[0..3]-join '|') -eq (@($event.l)[0..3]-join '|')){$proven=$true;$matchedResponses[[string]$pending.r]=$true}
-          $pendingResponses.Remove($session)
-        }
-        $event|Add-Member -NotePropertyName provenResponse -NotePropertyValue $proven -Force
-      }
-      # A moved source can have different line offsets. Remove exact historical
-      # copies before the existing response/state deduplication, ignoring i.
-      $identity=@($event.s,$event.a,$event.k,$event.mo,$event.ef,$event.sc,$event.turn,$event.r,
-        (@($event.l)-join ','),(@($event.t)-join ','),$event.du,$event.ft,$event.hf,$event.er,$event.w,$event.skill,$event.source)|ConvertTo-Json -Compress
-      $first=$eventIdentities.Add($identity)
-      if($historical -and -not $first){continue}
-      $allEvents.Add($event)
-    }
+    # Preserve source order/task boundaries and all 17 identity fields. A moved
+    # source's line offsets are deliberately excluded from exact-copy identity.
+    [AiUsageEventOpsV1]::AddSource($events,$historical,$eventIdentities,$allEvents,$matchedResponses,{
+      param($parts) 'J'+($parts|ConvertTo-Json -Compress)
+    })
   }
 
   if(-not (Test-Path -LiteralPath $cacheDir)){New-Item -ItemType Directory -Path $cacheDir -Force|Out-Null}
@@ -661,19 +801,22 @@ try {
   $skillHomeParentKey=NormalizeSkillPath $skillHomeParent ''
   $roots=@((Join-Path $codexHome 'sessions'),(Join-Path $codexHome 'archived_sessions'))|?{Test-Path -LiteralPath $_}
   $files=@($roots|%{Get-ChildItem -LiteralPath $_ -Recurse -File -Filter *.jsonl -EA SilentlyContinue})
+  MarkPhase 'discovery'
   $allEvents=[Collections.Generic.List[object]]::new();$newManifest=[Collections.Generic.List[object]]::new();$reused=0;$reparsed=0;$matchedResponses=@{}
   $eventIdentities=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $historyReuse=@{files=0}
   $currentKeys=@{};$retainedFiles=0;$recoveredFiles=0;$skippedCaches=0;$historyStart=$null
   [long]$historyBytesRead=0
   foreach($file in $files){$currentKeys[(PathKey $file.FullName)]=$true}
   [long]$sourceBytes=0;[long]$sourceBytesRead=0;[long]$cacheBytesRead=0;[long]$cacheBytes=0;$migrated=0
   foreach($file in $files){
-    $path=$file.FullName;$sig=EventSignature $file;$key=PathKey $path;$cache=Join-Path $cacheDir ($key+'.json');$previous=$oldByPath[$key];$events=$null;$rewriteCache=$false
+    $path=$file.FullName;$sig=EventSignature $file;$key=PathKey $path;$cache=Join-Path $cacheDir ($key+'.json');$previous=$oldByPath[$key];$events=$null;$rewriteCache=$false;$cacheText=$null
     $sourceBytes+=$file.Length
     if($previous -and [string]$previous.signature -eq $sig -and (Test-Path -LiteralPath $cache)){
       try {
         $cacheBytesRead+=(Get-Item -LiteralPath $cache).Length
-        $cacheData=Get-Content -Raw -LiteralPath $cache|ConvertFrom-Json
+        $cacheText=[IO.File]::ReadAllText((DiskPath $cache))
+        $cacheData=$cacheText|ConvertFrom-Json
         if($cacheData.version -eq $cacheVersion -and $cacheData.parser -in $compatibleParsers){
           $events=@(ReadStoredEvents $cacheData)
           if($cacheData.parser -ne $parserFingerprint){$rewriteCache=$true;$migrated++}
@@ -691,15 +834,17 @@ try {
     if($rewriteCache){
       $cacheJson=[ordered]@{version=$cacheVersion;parser=$parserFingerprint;source=$sourceKey;events=[object[]]$events}|ConvertTo-Json -Depth 8 -Compress
       WriteAtomicText $cache $cacheJson
+      $cacheText=$cacheJson
     }
     $cacheBytes+=(Get-Item -LiteralPath $cache).Length
     $newManifest.Add([ordered]@{key=$key;signature=$sig;cache=$key})
-    SaveHistoryEvents $key $sig $events
+    SaveHistoryEvents $key $sig $events (PathKey $cacheText) (-not $rewriteCache)
     # Validate response linkage against source order and task boundaries on every
     # aggregation, including warm caches. The extracted r on token_count is only
     # a candidate; identical usage in a later turn cannot cover an older response.
     AddSourceEvents $events $false
   }
+  MarkPhase 'currentEvents'
   # Unbound caches predate source isolation. Import only by explicit local
   # request; a changed SourceRoot must never silently pick up another source.
   if($RecoverHistoricalCaches){
@@ -735,7 +880,16 @@ try {
     }
     AddSourceEvents $events $true
   }
+  MarkPhase 'historyEvents'
   $manifest=[ordered]@{version=$cacheVersion;parser=$parserFingerprint;source=$sourceKey;generated=([DateTimeOffset]::UtcNow.ToString('o'));files=@($newManifest)}
+
+  $coveredRecordsReleased=[AiUsageEventOpsV1]::ReleaseCoveredRecords($allEvents,$matchedResponses)
+  $eventIdentities.Clear();$eventIdentities.TrimExcess()
+  $events=$null;$stored=$null;$cacheData=$null;$cacheText=$null;$json=$null
+  # Drop temporary JSON/projection/index allocations before the sort, rather
+  # than letting background refreshes page those unused objects back from disk.
+  [GC]::Collect()
+  MarkPhase 'workingMemory'
 
   $usage=@{};$tasks=@{};$compact=@{};$sn=0;$dupes=0;$supplementalRequests=0;[long]$supplementalTokens=0
   $coveredUsageStates=@{};$seenResponses=@{}
@@ -801,6 +955,7 @@ try {
       }
     }
   }
+  MarkPhase 'tokensAndTasks'
   $asOf=if($AsOfDate){[DateTime]::ParseExact($AsOfDate,'yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture)}else{([DateTimeOffset]::UtcNow.ToOffset($tz)).Date}
   $endDay=$asOf.ToString('yyyy-MM-dd');$start7=$asOf.AddDays(-6).ToString('yyyy-MM-dd');$start30=$asOf.AddDays(-29).ToString('yyyy-MM-dd')
   $skillReads7=@{};$skillReads30=@{};$skillGroups=@{}
@@ -829,7 +984,9 @@ try {
   $skillRows=@(foreach($group in ($skillGroups.Values|Sort-Object @{Expression='readTurns30';Descending=$true},skill,source)){
     [ordered]@{skill=$group.skill;source=$group.source;readTurns7=$group.readTurns7;tasks7=$group.sessions7.Count;readTurns30=$group.readTurns30;tasks30=$group.sessions30.Count}
   })
+  MarkPhase 'skills'
   $metadata=GetSkillMetadata $skillActivity ([IO.Path]::GetFullPath($codexHome))
+  MarkPhase 'skillMetadata'
   $skills=[ordered]@{metric='skill_instruction_reads';timeZone='Asia/Shanghai';asOf=$endDay;scope='main_sessions';windows=[ordered]@{days7=[ordered]@{start=$start7;end=$endDay};days30=[ordered]@{start=$start30;end=$endDay}};rows=$skillRows;activitySchema=1;activity=@($skillActivity|Sort-Object date,skill,source,task,turn);metadataSchema=1;metadataAsOf=(Day ([DateTimeOffset]::UtcNow));metadata=$metadata.rows}
   $skills.inventorySchema=1;$skills.inventoryAsOf=Day ([DateTimeOffset]::UtcNow)
   $skills.inventoryScope='known_local_skill_roots';$skills.inventory=$metadata.inventory
@@ -837,6 +994,11 @@ try {
   $now=([DateTimeOffset]::UtcNow.ToOffset($tz)).ToString('yyyy-MM-dd HH:mm')
   $historyStats=[ordered]@{schema=1;retainedFiles=$retainedFiles;recoveredFiles=$recoveredFiles;skippedCaches=$skippedCaches;startDate=$historyStart}
   $data=[ordered]@{schema=2;usageScopeSchema=1;skills=$skills;generated=$now;month=$month;usage=@($usage.Values);tasks=@($tasks.Values);compactions=@($compact.Values);duplicates=$dupes;refresh=[ordered]@{files=$files.Count;reused=$reused;reparsed=$reparsed;migrated=$migrated;sourceBytes=$sourceBytes;sourceBytesRead=$sourceBytesRead;cacheBytesRead=$cacheBytesRead;cacheBytes=$cacheBytes;elapsedMs=$generationTimer.ElapsedMilliseconds;skillMetadata=$metadata.cost;supplementalTokenRequests=$supplementalRequests;supplementalTokens=$supplementalTokens;history=$historyStats}}
+  MarkPhase 'prepareOutput'
+  $data.refresh.historyWritesReused=$historyReuse.files
+  $data.refresh.coveredRecordsReleased=$coveredRecordsReleased
+  $data.refresh.phaseMs=$phaseTimes
+  $data.refresh.elapsedMs=$generationTimer.ElapsedMilliseconds
   $dataJson=$data|ConvertTo-Json -Depth 10 -Compress
 
   $webRoot=Join-Path $PSScriptRoot 'web'

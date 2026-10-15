@@ -55,6 +55,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run-ai-usage-dashboard-ref
 
 `.codex-usage-dashboard-cache/` 用于加速，HTML 与数据 JSON 可重新生成；`.codex-usage-dashboard-history/` 在原日志迁移后可能成为统计事件的唯一副本，应随本机私有备份保存，不能当作可随意清理的缓存。历史使用不可变事件块和成功提交的清单，失败刷新不覆盖已提交历史；旧块目前不自动清理。它不是 Codex 原始聊天备份。首次安装在历史迁移之后且没有兼容缓存的机器，不能仅从本项目代码重建已消失的用量。
 
+刷新按文件复用提取缓存，变动文件仍整份重读；结构事件每轮严格校验、去重与汇总。未变源的缓存内容、历史块、文件签名和解析指纹绑定一致，且历史块通过完整性检查时，复用历史块以减少重复序列化。校验和事件合并使用内存中的 .NET 辅助代码；排序前释放已确认由消耗记录覆盖的额外逐请求记录及临时索引，保留每线程分组与旧记录的补计判断。不增加安装或后台任务，统计口径及缓存版本不变。分阶段耗时和历史写入复用量见 [刷新成本说明](docs/skill-read-metrics.md#刷新成本频率与数据增长)。
+
 ## Skill 说明读取
 
 Skill 页签提供去重总览、每日趋势、来源分布和审计明细；可按日期、名称/简介、来源、观察项筛选并排序，支持近 7 天、近 30 天、本月、全部历史或自定义区间，以及手动导出当前审计快照。趋势图显示数量刻度并可查看逐日精确读数。读取统计来自 `SourceRoot` 下的 `sessions/` 与 `archived_sessions/`，排除可识别的 guardian 和子代理；按会话、轮次与同来源 Skill 去重。可用清单、名称提及和只列路径的命令均不计数。
@@ -77,6 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Generator.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenAttribution.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenFallback.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryRetention.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-RefreshPerformance.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Service.ps1 -ServiceHost powershell.exe
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UiContract.ps1
 ```
