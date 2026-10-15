@@ -6,8 +6,11 @@
 
 - 可修改的运行源：`refresh-ai-usage-dashboard.ps1`、`start-ai-usage-dashboard-service.ps1`、`run-ai-usage-dashboard-refresh.ps1`，以及 `web/dashboard.html`、`web/dashboard.css`、`web/dashboard.js`。生成器将三份网页源内联成自包含 HTML。
 - 生成物：`codex-usage-dashboard.html`、`codex-usage-dashboard-data.json`、`.codex-usage-dashboard-cache/`。不要直接编辑；下次刷新会覆盖它们。
+- 本地历史：`.codex-usage-dashboard-history/` 按数据源保留精简统计事件，原日志迁移后仍参与统一去重汇总。它与加速缓存分开，不进入版本控制；源日志已缺失时不能删除。旧孤立缓存只通过显式 `run-ai-usage-dashboard-refresh.ps1 -RecoverHistoricalCaches` 恢复，详见 README。
 - 自动维护只通过 `register-ai-usage-dashboard-maintenance.ps1` 登记当前用户计划任务。迁移本目录后重新运行该脚本；必须以端口、API、任务结果和新监听进程验证，不能只以任务存在判断恢复。数据目录来自被忽略的 `codex-usage-dashboard.local.psd1`。
 - UI 变更完成后必须运行 `tests/Test-UiContract.ps1`、`node tests/Test-Frontend.cjs`，并在浏览器验证桌面三块占比横排、390px 单列和筛选保留。后端变更运行 `tests/Test-Generator.ps1`、`tests/Test-Service.ps1`，兼容 PowerShell 5.1 与 7。
+
+历史留存不改变统计口径。存储格式变化需分别适配输入，再统一去重；没有固定日期分段累计规则。已提交历史无法读取且源日志不存在时，拒绝生成缩短历史的新快照。切换 SourceRoot 使用隔离历史，不能自动把旧输出目录中的孤立缓存当作新来源。
 
 ## 当前 UI 契约
 

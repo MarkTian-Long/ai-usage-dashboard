@@ -676,6 +676,10 @@ function render() {
   q('#usageScopeNote').textContent = hasUsageScopes()
     ? '当前统计：' + USAGE_SCOPES[usageScope()] + '。模型占比按原始 Token 计算，不代表官方套餐额度占比。'
     : '旧快照未区分任务与自动安全审查，当前仅展示全部 Token；模型归属未按新口径核验。点击“立即刷新”后可分开查看。原始 Token 不代表官方套餐额度。';
+  const history = D.refresh?.history, hasRetainedHistory = history?.retainedFiles > 0;
+  q('#usageHistoryNote').classList.toggle('hidden', !hasRetainedHistory);
+  q('#usageHistoryNote').textContent = hasRetainedHistory
+    ? '原日志迁移后的历史统计已合并保留' + (history.startDate ? '，最早可见日期为 ' + history.startDate : '') + '。' : '';
   selectPage(q('.tab[aria-selected=true]').dataset.page);
   q('#cacheInfo').textContent = D.refresh
     ? '本次源文件缓存：' + D.refresh.reused + ' 个复用，' + D.refresh.reparsed + ' 个重新解析。'
@@ -690,6 +694,10 @@ function render() {
     && Number.isSafeInteger(D.refresh?.supplementalTokens) && D.refresh.supplementalTokens >= 0) {
     q('#cacheInfo').textContent += ' Token 汇总已补计 ' + D.refresh.supplementalTokenRequests + ' 条逐请求记录（'
       + F(D.refresh.supplementalTokens) + ' Token，已按响应去重）。';
+  }
+  if (history) {
+    q('#cacheInfo').textContent += ' 历史统计：本次恢复 ' + history.recoveredFiles + ' 个文件，留存合并 '
+      + history.retainedFiles + ' 个文件，跳过 ' + history.skippedCaches + ' 份缓存。';
   }
 }
 
@@ -789,6 +797,12 @@ function validateData(data) {
   if (Object.prototype.hasOwnProperty.call(data, 'usageScopeSchema')) {
     if (data.usageScopeSchema !== 1 || !['usage', 'tasks', 'compactions'].every(key => data[key].every(row =>
       row && ['task', 'auto_review'].includes(row.scope)))) throw Error('Token 统计范围数据格式无效');
+  }
+  if (Object.prototype.hasOwnProperty.call(data.refresh || {}, 'history')) {
+    const history = data.refresh.history;
+    if (!history || typeof history !== 'object' || Array.isArray(history) || history.schema !== 1
+      || !['retainedFiles', 'recoveredFiles', 'skippedCaches'].every(key => Number.isSafeInteger(history[key]) && history[key] >= 0)
+      || history.startDate !== null && !calendarDate(history.startDate)) throw Error('历史统计数据格式无效');
   }
   const identity = row => row && typeof row === 'object' && !Array.isArray(row) && calendarDate(row.date)
     && Number.isSafeInteger(row.session) && row.session >= 1

@@ -2,6 +2,7 @@
 codex-usage-dashboard.html
 codex-usage-dashboard-data.json
 .codex-usage-dashboard-cache/
+.codex-usage-dashboard-history/
 *.log
 
 # Per-machine configuration may contain a local source path.

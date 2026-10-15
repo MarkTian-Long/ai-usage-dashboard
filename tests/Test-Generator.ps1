@@ -47,8 +47,14 @@ function Write-JsonFile([string]$Path, [object]$Value) {
   $json = ConvertTo-Json -InputObject $Value -Depth 12 -Compress
   [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
 }
+function Read-TestText([string]$Path) {
+  if([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path.Length -ge 240 -and -not $Path.StartsWith('\\?\')) {
+    $Path=if($Path.StartsWith('\\')){'\\?\UNC\'+$Path.Substring(2)}else{'\\?\'+$Path}
+  }
+  [IO.File]::ReadAllText($Path)
+}
 function Read-JsonFile([string]$Path) {
-  ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($Path))
+  ConvertFrom-Json -InputObject (Read-TestText $Path)
 }
 function Get-PathKey([string]$Path) {
   $sha = [Security.Cryptography.SHA256]::Create()
@@ -390,7 +396,7 @@ function Assert-SkillMetadataContract([string]$Scenario, [object]$Data) {
 function Assert-SkillPrivacy([string]$Scenario) {
   $artifactFiles = @(Get-ChildItem -LiteralPath $skillOutputRoot -Recurse -File | Where-Object { $_.Extension -in '.json', '.html' })
   foreach ($file in $artifactFiles) {
-    $content = [IO.File]::ReadAllText($file.FullName)
+    $content = Read-TestText $file.FullName
     $safe = $true
     foreach ($sensitive in @('fixture-private-username', 'synthetic-private-workspace', 'unknown-private-title',
       'PRIVATE_SESSION_BODY_SENTINEL', 'PRIVATE_TOOL_ARGUMENT_SENTINEL', 'listed-only', 'mentioned-only',

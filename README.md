@@ -7,6 +7,7 @@ AI 使用看板，当前数据来源为 Codex。在 Windows 本地只读扫描 C
 本仓库追踪生成器、回环服务、静态界面、合成测试和运行说明。下列内容均被 `.gitignore` 排除：
 
 - 本机生成的 HTML、数据 JSON、增量缓存和服务日志；
+- 按数据源隔离保存的本地统计历史；
 - `codex-usage-dashboard.local.psd1` 中的本机源目录；
 - 本机验收记录和含实际观测量值的原始说明；
 - 测试临时目录、依赖目录和环境文件。
@@ -40,6 +41,20 @@ Token 优先使用 `token_count` 的消耗记录；存在逐请求 `token_usage_
 
 事件缓存版本 7 会从只读日志重建旧版缓存，因为旧版缺少实际线程归属或逐请求消耗记录。没有分类的旧数据快照明确显示全部 Token，刷新后才能使用分开的范围。无效核心数值、日期、身份、状态或时长会使新快照被拒绝，页面保留上一份有效统计。
 
+### 日志迁移后的历史保留
+
+每次成功读取的精简统计事件另存于 `.codex-usage-dashboard-history/`，按规范化后的 `SourceRoot` 哈希隔离。源 JSONL 后续被 Codex 迁移、归档或移走时，刷新仍合并已保留事件，并按线程、响应与数值状态去重；不按某个版本日期硬切，也不直接相加旧快照总量。源文件恢复时优先读取当前文件，替换同路径的留存版本。历史仅含结构性身份、时间、归属和计数，不含会话正文、完整工具参数或原始响应 ID，也不进入 GitHub。
+
+若升级前历史已经消失，但同一输出目录还保留兼容事件缓存，可在确认这些缓存属于当前数据源后执行一次：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run-ai-usage-dashboard-refresh.ps1 -RecoverHistoricalCaches
+```
+
+这个显式恢复入口仅导入当前版本及读取指纹兼容的缓存；未知版本、未知指纹或损坏缓存跳过并在统计说明报告。普通刷新不自动导入未绑定数据源的旧缓存，避免切换数据源时串入另一份历史。已提交历史损坏或无法兼容、且原日志缺失时，刷新失败并保留上一份有效数据，不悄悄缩短历史。没有原日志、兼容缓存或已保留统计事件的日期，不能据此补成零，也不能保证完整恢复。
+
+`.codex-usage-dashboard-cache/` 用于加速，HTML 与数据 JSON 可重新生成；`.codex-usage-dashboard-history/` 在原日志迁移后可能成为统计事件的唯一副本，应随本机私有备份保存，不能当作可随意清理的缓存。历史使用不可变事件块和成功提交的清单，失败刷新不覆盖已提交历史；旧块目前不自动清理。它不是 Codex 原始聊天备份。首次安装在历史迁移之后且没有兼容缓存的机器，不能仅从本项目代码重建已消失的用量。
+
 ## Skill 说明读取
 
 Skill 页签提供去重总览、每日趋势、来源分布和审计明细；可按日期、名称/简介、来源、观察项筛选并排序，支持近 7 天、近 30 天、本月、全部历史或自定义区间，以及手动导出当前审计快照。趋势图显示数量刻度并可查看逐日精确读数。读取统计来自 `SourceRoot` 下的 `sessions/` 与 `archived_sessions/`，排除可识别的 guardian 和子代理；按会话、轮次与同来源 Skill 去重。可用清单、名称提及和只列路径的命令均不计数。
@@ -61,6 +76,7 @@ node .\tests\Test-Frontend.cjs
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Generator.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenAttribution.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TokenFallback.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryRetention.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Service.ps1 -ServiceHost powershell.exe
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UiContract.ps1
 ```

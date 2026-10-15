@@ -76,6 +76,13 @@ const scopedFixture = () => ({
     { date: '2026-09-07', session: 13, scope: 'auto_review', model: 'codex-auto-review', effort: 'low' }
   ]
 });
+const historyFixture = () => {
+  const data = scopedFixture();
+  data.refresh.history = { schema: 1, retainedFiles: 2, recoveredFiles: 1, skippedCaches: 3, startDate: '2026-08-05' };
+  data.usage.push({ ...data.usage[0], date: '2026-08-05', session: 15 });
+  data.tasks.push({ ...data.tasks[0], date: '2026-08-05', session: 15 });
+  return data;
+};
 const metadataFixture = () => {
   const data = activityFixture();
   data.skills.metadataSchema = 1;
@@ -801,6 +808,84 @@ async function test(name, action) { await action(); console.log('PASS ' + name);
     await h.run('loadData()');
     assert.match(h.elements.get('#cacheInfo').textContent, /本次重解析文件体积 1.0 MiB（按文件大小估算）/);
     assert.match(h.elements.get('#cacheInfo').textContent, /汇总阶段耗时 12.5 秒/);
+  });
+  await test('retained history is disclosed beside filters and expands a saved all-history range to August after update', async () => {
+    const h = harness({ session: JSON.stringify({ rangePreset: 'all', usageScope: 'task', model: 'a', effort: 'high', metric: 'cached', page: 'eff' }) });
+    let data = scopedFixture(), version = 'v1';
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : data));
+    await h.run('loadData()');
+    assert.equal(h.elements.get('#start').value, '2026-09-07');
+    assert.equal(h.elements.get('#usageHistoryNote').classList.contains('hidden'), true);
+    h.run('saveView()');
+    data = historyFixture(); version = 'v2'; await h.run('autoRefresh()');
+    assert.match(html, /id="usageScopeNote"[^>]*><\/div>\s*<div[^>]*id="usageHistoryNote"/);
+    assert.equal(h.elements.get('#usageHistoryNote').classList.contains('hidden'), false);
+    assert.equal(h.elements.get('#usageHistoryNote').textContent, '原日志迁移后的历史统计已合并保留，最早可见日期为 2026-08-05。');
+    assert.match(h.elements.get('#cacheInfo').textContent, /历史统计：本次恢复 1 个文件，留存合并 2 个文件，跳过 3 份缓存/);
+    assert.equal(h.elements.get('#usagePreset').value, 'all');
+    assert.equal(h.elements.get('#start').value, '2026-08-05'); assert.equal(h.elements.get('#end').value, '2026-09-28');
+    assert.equal(h.run('totals(filter(U)).total'), 200); assert.equal(h.run('totals(filter(U)).days'), 2);
+    assert.match(h.elements.get('#taskTrend').innerHTML, /2026-08-05 · 1 次请求/);
+    assert.equal(h.elements.get('#model').value, 'a'); assert.equal(h.elements.get('#effort').value, 'high');
+    assert.equal(h.elements.get('#metric').value, 'cached');
+    assert.equal(h.tabs.find(tab => tab.dataset.page === 'eff').getAttribute('aria-selected'), 'true');
+    assert.equal(h.run('JSON.parse(window.sessionStorage.getItem(VIEW_KEY)).rangePreset'), 'all');
+  });
+  await test('old snapshots and zero retained files hide the history notice; an unknown earliest date is not fabricated', async () => {
+    const h = harness(); let data = historyFixture();
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: 'v1' } : data));
+    await h.run('loadData()');
+    data.refresh.history.startDate = null; await h.run('loadData()');
+    assert.equal(h.elements.get('#usageHistoryNote').classList.contains('hidden'), false);
+    assert.equal(h.elements.get('#usageHistoryNote').textContent, '原日志迁移后的历史统计已合并保留。');
+    data.refresh.history = { schema: 1, retainedFiles: 0, recoveredFiles: 0, skippedCaches: 0, startDate: null };
+    await h.run('loadData()');
+    assert.equal(h.elements.get('#usageHistoryNote').classList.contains('hidden'), true);
+    assert.equal(h.elements.get('#usageHistoryNote').textContent, '');
+    assert.match(h.elements.get('#cacheInfo').textContent, /本次恢复 0 个文件，留存合并 0 个文件，跳过 0 份缓存/);
+    data = fixture(); await h.run('loadData()');
+    assert.equal(h.elements.get('#usageHistoryNote').classList.contains('hidden'), true);
+    assert.equal(h.elements.get('#usageHistoryNote').textContent, '');
+    assert.equal(h.elements.get('#cacheInfo').textContent, '本次源文件缓存：2 个复用，1 个重新解析。');
+    delete data.refresh; await h.run('loadData()');
+    assert.equal(h.elements.get('#usageHistoryNote').classList.contains('hidden'), true);
+    assert.equal(h.elements.get('#cacheInfo').textContent, '尚无本次刷新缓存信息。');
+  });
+  await test('invalid optional history metadata preserves the valid snapshot, historical filters and notice', async () => {
+    const h = harness({ session: JSON.stringify({ rangePreset: 'all', usageScope: 'task', model: 'a', effort: 'high' }) });
+    let data = historyFixture(), version = 'valid';
+    h.api(url => reply(url.startsWith('/api/status') ? { status: 'ready', updated: version } : data));
+    await h.run('loadData()'); h.run('saveView()');
+    const priorData = h.run('JSON.stringify(D)'), priorView = h.run('JSON.stringify(viewMemory)');
+    const priorChart = h.elements.get('#tokenTrend').innerHTML, priorNote = h.elements.get('#usageHistoryNote').textContent;
+    const mutations = [
+      d => { d.refresh.history = null; }, d => { d.refresh.history = []; }, d => { d.refresh.history = 'history'; },
+      d => { d.refresh.history = undefined; }, d => { delete d.refresh.history.schema; },
+      d => { d.refresh.history.schema = '1'; }, d => { d.refresh.history.schema = 2; },
+      d => { delete d.refresh.history.startDate; }, d => { d.refresh.history.startDate = '2026-02-30'; },
+      d => { d.refresh.history.startDate = '2026-8-05'; }, d => { d.refresh.history.startDate = 20260805; },
+      d => { d.refresh.history.startDate = ''; }
+    ];
+    for (const field of ['retainedFiles', 'recoveredFiles', 'skippedCaches']) {
+      mutations.push(d => { delete d.refresh.history[field]; });
+      for (const value of [-1, 0.5, '2', false, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+        mutations.push(d => { d.refresh.history[field] = value; });
+      }
+    }
+    version = 'bad';
+    for (const mutate of mutations) {
+      data = historyFixture(); mutate(data);
+      await assert.rejects(h.run('loadData()'), /历史统计数据格式无效/);
+      assert.equal(h.run('JSON.stringify(D)'), priorData); assert.equal(h.run('lastUpdated'), 'valid');
+      assert.equal(h.run('JSON.stringify(viewMemory)'), priorView);
+      assert.equal(h.elements.get('#start').value, '2026-08-05'); assert.equal(h.elements.get('#usagePreset').value, 'all');
+      assert.equal(h.elements.get('#tokenTrend').innerHTML, priorChart);
+      assert.equal(h.elements.get('#usageHistoryNote').textContent, priorNote);
+      assert.equal(h.elements.get('#usageHistoryNote').classList.contains('hidden'), false);
+    }
+    await h.run('autoRefresh()');
+    assert.match(h.elements.get('#state').textContent, /自动更新失败.*历史统计数据格式无效.*保留已加载数据/);
+    assert.equal(h.run('lastUpdated'), 'valid');
   });
   await test('supplemental Token accounting is disclosed only when valid counts are available', async () => {
     const h = harness(); let data = fixture();

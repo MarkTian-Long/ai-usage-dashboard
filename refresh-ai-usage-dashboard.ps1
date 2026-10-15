@@ -4,6 +4,7 @@ param(
   [string]$SourceRoot,
   [string]$OutputRoot,
   [string]$MutexName='Local\CodexUsageDashboardRefresh',
+  [switch]$RecoverHistoricalCaches,
   [ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$AsOfDate
 )
 $ErrorActionPreference='Stop'
@@ -63,7 +64,18 @@ try {
     # Ignore reported totals: input/output are the consumption basis.
     [string]$event.s+'|'+(@($event.l)[0..3]-join '|')+'|'+(@($event.t)[0..3]-join '|')
   }
+  function DiskPath([string]$path){
+    # Windows PowerShell 5.1's .NET APIs otherwise fail on nested history paths.
+    if([IO.Path]::DirectorySeparatorChar -eq '\' -and -not $path.StartsWith('\\?\')){
+      $full=[IO.Path]::GetFullPath($path)
+      if($full.Length -lt 240){return $full}
+      if($full.StartsWith('\\')){return '\\?\UNC\'+$full.Substring(2)}
+      return '\\?\'+$full
+    }
+    return $path
+  }
   function WriteAtomicText([string]$path,[string]$content){
+    $path=DiskPath $path
     $temporary=$path+'.tmp'
     [IO.File]::WriteAllText($temporary,$content,[Text.UTF8Encoding]::new($false))
     if([IO.File]::Exists($path)){[IO.File]::Replace($temporary,$path,[System.Management.Automation.Language.NullString]::Value)}
@@ -533,70 +545,69 @@ try {
     [pscustomobject]@{rows=$rows;inventory=$inventory;cost=$cost}
   }
 
-  if(-not (Test-Path -LiteralPath $cacheDir)){New-Item -ItemType Directory -Path $cacheDir -Force|Out-Null}
-  $parserFingerprint=GetParserFingerprint ([IO.File]::ReadAllText($PSCommandPath))
-  $compatibleParsers=@($parserFingerprint)
-  # Older caches lack actual attribution or per-response consumption records.
-  # They must be rebuilt from read-only source logs, never migrated hot.
-  $old=@()
-  if(Test-Path -LiteralPath $manifestPath){try{$manifestData=Get-Content -Raw $manifestPath|ConvertFrom-Json;if($manifestData.version -eq $cacheVersion -and $manifestData.parser -in $compatibleParsers){$old=@($manifestData.files)}}catch{$old=@()}}
-  $oldByPath=@{}
-  foreach($entry in $old){if($entry.key){$oldByPath[[string]$entry.key]=$entry}}
-  $codexHome=if($SourceRoot){$SourceRoot}elseif($env:CODEX_HOME){$env:CODEX_HOME}else{Join-Path $HOME '.codex'}
-  $skillHomeParent=Split-Path -Parent ([IO.Path]::GetFullPath($codexHome))
-  $skillHomeKey=NormalizeSkillPath $codexHome ''
-  $skillHomeParentKey=NormalizeSkillPath $skillHomeParent ''
-  $roots=@((Join-Path $codexHome 'sessions'),(Join-Path $codexHome 'archived_sessions'))|?{Test-Path -LiteralPath $_}
-  $files=@($roots|%{Get-ChildItem -LiteralPath $_ -Recurse -File -Filter *.jsonl -EA SilentlyContinue})
-  $allEvents=[Collections.Generic.List[object]]::new();$newManifest=[Collections.Generic.List[object]]::new();$reused=0;$reparsed=0;$matchedResponses=@{}
-  [long]$sourceBytes=0;[long]$sourceBytesRead=0;[long]$cacheBytesRead=0;[long]$cacheBytes=0;$migrated=0
-  foreach($file in $files){
-    $path=$file.FullName;$sig=EventSignature $file;$key=PathKey $path;$cache=Join-Path $cacheDir ($key+'.json');$previous=$oldByPath[$key];$events=$null;$rewriteCache=$false
-    $sourceBytes+=$file.Length
-    if($previous -and [string]$previous.signature -eq $sig -and (Test-Path -LiteralPath $cache)){
-      try {
-        $cacheBytesRead+=(Get-Item -LiteralPath $cache).Length
-        $cacheData=Get-Content -Raw -LiteralPath $cache|ConvertFrom-Json
-        if($cacheData.version -eq $cacheVersion -and $cacheData.parser -in $compatibleParsers){
-          if($null -eq $cacheData.PSObject.Properties['events']){throw 'Invalid event cache'}
-          $candidate=@($cacheData.events|Where-Object {$null -ne $_})
-          foreach($event in $candidate){
-            if(-not $event.s -or -not $event.k -or -not $event.a){throw 'Invalid cached event'}
-            $event.a=(ParseTimestamp $event.a).ToUniversalTime().ToString('o')
-            if($event.k -eq 'skill_read' -and (-not $event.turn -or -not $event.skill -or $event.source -notin 'personal','workspace','system','plugin','unknown')){throw 'Invalid skill cache'}
-            if($event.k -ne 'skill_read' -and (-not $event.mo -or -not $event.ef -or $event.sc -notin 'task','auto_review')){throw 'Invalid attribution cache'}
-            if($event.k -eq 'token_count' -and (@($event.l).Count -ne 5 -or @($event.t).Count -ne 5)){throw 'Invalid token cache'}
-            if($event.k -eq 'token_usage_record'){
-              if($event.r -notmatch '^[a-f0-9]{64}$' -or @($event.l).Count -ne 5 -or @($event.t).Count -ne 5){throw 'Invalid response usage cache'}
-              foreach($vector in @($event.l,$event.t)){
-                foreach($number in $vector){if($null -eq $number -or $number -is [bool] -or $number -is [string] -or [double]$number -lt 0 -or [double]$number -gt 9007199254740991 -or [double]::IsNaN([double]$number) -or [double]::IsInfinity([double]$number) -or [Math]::Floor([double]$number) -ne [double]$number){throw 'Invalid response usage values'}}
-                if($vector[1] -gt $vector[0] -or $vector[3] -gt $vector[2] -or $vector[4] -ne $vector[0]+$vector[2]){throw 'Invalid response usage composition'}
-              }
-            }
+  # Durable structural history is separate from the disposable speed cache.
+  # Keep this validation/projection outside the source parser fingerprint: no
+  # extraction rule changes, and old source-less events must remain readable.
+  function ReadStoredEvents($stored){
+    if($stored.version -ne $cacheVersion -or $stored.parser -notin $compatibleParsers -or
+      $null -eq $stored.PSObject.Properties['events'] -or $null -eq $stored.events){throw 'Incompatible stored events'}
+    foreach($event in @($stored.events)){
+      if($null -eq $event -or $event.s -isnot [string] -or [string]::IsNullOrWhiteSpace($event.s) -or -not (T $event a) -or
+        $event.k -notin 'token_count','token_usage_record','thread_settings_applied','task_started','task_complete','compacted','context_compacted','skill_read'){throw 'Invalid stored event'}
+      $at=(ParseTimestamp $event.a).ToUniversalTime().ToString('o')
+      if($null -eq $event.i -or $event.i -is [bool] -or $event.i -is [string] -or [double]$event.i -lt 1 -or
+        [double]$event.i -gt 9007199254740991 -or [Math]::Floor([double]$event.i) -ne [double]$event.i){throw 'Invalid stored event order'}
+      if($null -ne $event.PSObject.Properties['turn'] -and ($event.turn -isnot [string] -or [string]::IsNullOrWhiteSpace($event.turn))){throw 'Invalid stored turn'}
+      if($event.k -eq 'skill_read'){
+        if(-not (T $event turn) -or $event.skill -isnot [string] -or [string]::IsNullOrWhiteSpace($event.skill) -or $event.source -notin 'personal','workspace','system','plugin','unknown'){throw 'Invalid stored skill event'}
+      }elseif($event.mo -isnot [string] -or [string]::IsNullOrWhiteSpace($event.mo) -or
+        $event.ef -isnot [string] -or [string]::IsNullOrWhiteSpace($event.ef) -or $event.sc -notin 'task','auto_review'){throw 'Invalid stored attribution'}
+      if($event.k -in 'token_count','token_usage_record'){
+        if(@($event.l).Count -ne 5 -or @($event.t).Count -ne 5){throw 'Invalid stored usage vector'}
+        foreach($vectorName in 'l','t'){
+          $vector=$event.$vectorName
+          foreach($number in $vector){
+            if($null -eq $number -or $number -is [bool] -or $number -is [string] -or [double]$number -lt 0 -or
+              [double]$number -gt 9007199254740991 -or [double]::IsNaN([double]$number) -or
+              [double]::IsInfinity([double]$number) -or [Math]::Floor([double]$number) -ne [double]$number){throw 'Invalid stored usage values'}
           }
-          $events=$candidate
-          if($cacheData.parser -ne $parserFingerprint){$rewriteCache=$true;$migrated++}
-          $reused++
+          # Legacy cumulative vectors are state markers, not consumption. Their
+          # breakdown can be incomplete; only the last vector contributes usage.
+          if(($event.k -eq 'token_usage_record' -or $vectorName -eq 'l') -and ($vector[1] -gt $vector[0] -or $vector[3] -gt $vector[2])){throw 'Invalid stored usage composition'}
+          if($event.k -eq 'token_usage_record' -and $vector[4] -ne $vector[0]+$vector[2]){throw 'Invalid stored response usage'}
         }
-      } catch {$events=$null}
+        if($event.k -eq 'token_usage_record' -and $event.r -notmatch '^[a-f0-9]{64}$'){throw 'Invalid stored response identity'}
+      }
+      if($event.k -in 'task_started','task_complete' -and -not (T $event turn)){throw 'Invalid stored turn identity'}
+      if($event.k -eq 'task_complete'){
+        foreach($name in 'du','ft'){
+          $value=$event.$name
+          if($null -ne $value -and ($value -is [bool] -or $value -is [string] -or [double]$value -lt 0 -or [double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value))){throw 'Invalid stored duration'}
+        }
+        if($event.hf -isnot [bool] -or $event.er -isnot [bool]){throw 'Invalid stored turn status'}
+      }
+      # Only known structural fields may enter either storage or aggregation.
+      $projected=[ordered]@{s=[string]$event.s;a=$at;i=$event.i;k=[string]$event.k}
+      foreach($name in 'mo','ef','sc','turn','r','l','t','du','ft','hf','er','w','skill','source'){
+        if($null -ne $event.PSObject.Properties[$name]){$projected[$name]=$event.$name}
+      }
+      [pscustomobject]$projected
     }
-    if($null -eq $events){
-      $events=@(ReadEvents $file)
-      $reparsed++
-      $sourceBytesRead+=$file.Length
-      $rewriteCache=$true
-    }
-    if($rewriteCache){
-      $cacheJson=[ordered]@{version=$cacheVersion;parser=$parserFingerprint;events=[object[]]$events}|ConvertTo-Json -Depth 8 -Compress
-      WriteAtomicText $cache $cacheJson
-    }
-    $cacheBytes+=(Get-Item -LiteralPath $cache).Length
-    $newManifest.Add([ordered]@{key=$key;signature=$sig;cache=$key})
-    # Validate response linkage against source order and task boundaries on every
-    # aggregation, including warm caches. The extracted r on token_count is only
-    # a candidate; identical usage in a later turn cannot cover an older response.
+  }
+  function SaveHistoryEvents([string]$key,[string]$signature,[object[]]$events){
+    $json=[ordered]@{schema=1;source=$sourceKey;version=$cacheVersion;parser=$parserFingerprint;events=[object[]]$events}|ConvertTo-Json -Depth 8 -Compress
+    $hash=PathKey $json
+    # Never replace a blob referenced by the last committed manifest with newer
+    # content: another failure later in this refresh must leave it recoverable.
+    $path=Join-Path $historyDir ($hash+'.json')
+    $valid=$false
+    if([IO.File]::Exists((DiskPath $path))){try {$valid=(PathKey ([IO.File]::ReadAllText((DiskPath $path)))) -eq $hash}catch{}}
+    if(-not $valid){WriteAtomicText $path $json}
+    $historyEntries[$key]=[pscustomobject][ordered]@{key=$key;signature=$signature;parser=$parserFingerprint;hash=$hash}
+  }
+  function AddSourceEvents([object[]]$events,[bool]$historical){
     $pendingResponses=@{}
-    foreach($event in @($events)){
+    foreach($event in $events){
       $session=[string]$event.s
       if($event.k -eq 'token_usage_record'){$pendingResponses[$session]=$event}
       elseif($event.k -in 'task_started','task_complete'){$pendingResponses.Remove($session)}
@@ -609,10 +620,122 @@ try {
         }
         $event|Add-Member -NotePropertyName provenResponse -NotePropertyValue $proven -Force
       }
+      # A moved source can have different line offsets. Remove exact historical
+      # copies before the existing response/state deduplication, ignoring i.
+      $identity=@($event.s,$event.a,$event.k,$event.mo,$event.ef,$event.sc,$event.turn,$event.r,
+        (@($event.l)-join ','),(@($event.t)-join ','),$event.du,$event.ft,$event.hf,$event.er,$event.w,$event.skill,$event.source)|ConvertTo-Json -Compress
+      $first=$eventIdentities.Add($identity)
+      if($historical -and -not $first){continue}
       $allEvents.Add($event)
     }
   }
-  $manifest=[ordered]@{version=$cacheVersion;parser=$parserFingerprint;generated=([DateTimeOffset]::UtcNow.ToString('o'));files=@($newManifest)}
+
+  if(-not (Test-Path -LiteralPath $cacheDir)){New-Item -ItemType Directory -Path $cacheDir -Force|Out-Null}
+  $parserFingerprint=GetParserFingerprint ([IO.File]::ReadAllText($PSCommandPath))
+  $compatibleParsers=@($parserFingerprint)
+  # Older caches lack actual attribution or per-response consumption records.
+  # They must be rebuilt from read-only source logs, never migrated hot.
+  $old=@()
+  if(Test-Path -LiteralPath $manifestPath){try{$manifestData=Get-Content -Raw $manifestPath|ConvertFrom-Json;if($manifestData.version -eq $cacheVersion -and $manifestData.parser -in $compatibleParsers){$old=@($manifestData.files)}}catch{$old=@()}}
+  $oldByPath=@{}
+  foreach($entry in $old){if($entry.key){$oldByPath[[string]$entry.key]=$entry}}
+  $codexHome=if($SourceRoot){$SourceRoot}elseif($env:CODEX_HOME){$env:CODEX_HOME}else{Join-Path $HOME '.codex'}
+  $canonicalSource=[IO.Path]::GetFullPath($codexHome).TrimEnd('\','/').ToLowerInvariant()
+  $sourceKey=PathKey $canonicalSource
+  $historyDir=Join-Path (Join-Path $OutputRoot '.codex-usage-dashboard-history') $sourceKey
+  $historyManifestPath=Join-Path $historyDir 'manifest.json'
+  $historyEntries=@{}
+  if([IO.File]::Exists((DiskPath $historyManifestPath))){
+    try {
+      $historyManifest=[IO.File]::ReadAllText((DiskPath $historyManifestPath))|ConvertFrom-Json
+      if($historyManifest.schema -ne 1 -or $historyManifest.source -ne $sourceKey -or $null -eq $historyManifest.PSObject.Properties['files']){throw 'Invalid history manifest'}
+      foreach($entry in @($historyManifest.files)){
+        if($entry.key -notmatch '^[a-f0-9]{64}$' -or $entry.hash -notmatch '^[a-f0-9]{64}$' -or $entry.parser -notmatch '^[a-f0-9]{64}$' -or $historyEntries.ContainsKey([string]$entry.key)){throw 'Invalid history entry'}
+        $historyEntries[[string]$entry.key]=$entry
+      }
+    }catch{throw 'Historical statistics index is unreadable. Restore the local history backup; the previous dashboard snapshot was kept.'}
+  }
+  [void][IO.Directory]::CreateDirectory((DiskPath $historyDir))
+  $skillHomeParent=Split-Path -Parent ([IO.Path]::GetFullPath($codexHome))
+  $skillHomeKey=NormalizeSkillPath $codexHome ''
+  $skillHomeParentKey=NormalizeSkillPath $skillHomeParent ''
+  $roots=@((Join-Path $codexHome 'sessions'),(Join-Path $codexHome 'archived_sessions'))|?{Test-Path -LiteralPath $_}
+  $files=@($roots|%{Get-ChildItem -LiteralPath $_ -Recurse -File -Filter *.jsonl -EA SilentlyContinue})
+  $allEvents=[Collections.Generic.List[object]]::new();$newManifest=[Collections.Generic.List[object]]::new();$reused=0;$reparsed=0;$matchedResponses=@{}
+  $eventIdentities=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $currentKeys=@{};$retainedFiles=0;$recoveredFiles=0;$skippedCaches=0;$historyStart=$null
+  [long]$historyBytesRead=0
+  foreach($file in $files){$currentKeys[(PathKey $file.FullName)]=$true}
+  [long]$sourceBytes=0;[long]$sourceBytesRead=0;[long]$cacheBytesRead=0;[long]$cacheBytes=0;$migrated=0
+  foreach($file in $files){
+    $path=$file.FullName;$sig=EventSignature $file;$key=PathKey $path;$cache=Join-Path $cacheDir ($key+'.json');$previous=$oldByPath[$key];$events=$null;$rewriteCache=$false
+    $sourceBytes+=$file.Length
+    if($previous -and [string]$previous.signature -eq $sig -and (Test-Path -LiteralPath $cache)){
+      try {
+        $cacheBytesRead+=(Get-Item -LiteralPath $cache).Length
+        $cacheData=Get-Content -Raw -LiteralPath $cache|ConvertFrom-Json
+        if($cacheData.version -eq $cacheVersion -and $cacheData.parser -in $compatibleParsers){
+          $events=@(ReadStoredEvents $cacheData)
+          if($cacheData.parser -ne $parserFingerprint){$rewriteCache=$true;$migrated++}
+          $reused++
+        }
+      } catch {$events=$null}
+    }
+    if($null -eq $events){
+      $events=@(ReadEvents $file)
+      $events=@(ReadStoredEvents ([pscustomobject]@{version=$cacheVersion;parser=$parserFingerprint;events=[object[]]$events}))
+      $reparsed++
+      $sourceBytesRead+=$file.Length
+      $rewriteCache=$true
+    }
+    if($rewriteCache){
+      $cacheJson=[ordered]@{version=$cacheVersion;parser=$parserFingerprint;source=$sourceKey;events=[object[]]$events}|ConvertTo-Json -Depth 8 -Compress
+      WriteAtomicText $cache $cacheJson
+    }
+    $cacheBytes+=(Get-Item -LiteralPath $cache).Length
+    $newManifest.Add([ordered]@{key=$key;signature=$sig;cache=$key})
+    SaveHistoryEvents $key $sig $events
+    # Validate response linkage against source order and task boundaries on every
+    # aggregation, including warm caches. The extracted r on token_count is only
+    # a candidate; identical usage in a later turn cannot cover an older response.
+    AddSourceEvents $events $false
+  }
+  # Unbound caches predate source isolation. Import only by explicit local
+  # request; a changed SourceRoot must never silently pick up another source.
+  if($RecoverHistoricalCaches){
+    foreach($file in @(Get-ChildItem -LiteralPath $cacheDir -File -Filter '*.json'|Where-Object {$_.BaseName -match '^[a-f0-9]{64}$'})){
+      $key=$file.BaseName
+      if($currentKeys.ContainsKey($key) -or $historyEntries.ContainsKey($key)){continue}
+      try {
+        $stored=[IO.File]::ReadAllText($file.FullName)|ConvertFrom-Json
+        if((T $stored source) -and $stored.source -ne $sourceKey){throw 'Different source cache'}
+        $events=@(ReadStoredEvents $stored)
+      }catch{$skippedCaches++;continue}
+      SaveHistoryEvents $key 'recovered' $events
+      $recoveredFiles++
+    }
+  }
+  foreach($entry in @($historyEntries.Values|Sort-Object key)){
+    if($currentKeys.ContainsKey([string]$entry.key)){continue}
+    try {
+      $path=Join-Path $historyDir ($entry.hash+'.json')
+      $json=[IO.File]::ReadAllText((DiskPath $path))
+      if((PathKey $json) -ne $entry.hash){throw 'Historical event integrity mismatch'}
+      $stored=$json|ConvertFrom-Json
+      if($stored.schema -ne 1 -or $stored.source -ne $sourceKey -or $entry.parser -ne $stored.parser){throw 'Invalid history source'}
+      $events=@(ReadStoredEvents $stored)
+    }catch{throw 'Historical statistics are unreadable or require a compatible parser. Restore the original logs or local history backup; the previous dashboard snapshot was kept.'}
+    $historyBytesRead+=[Text.Encoding]::UTF8.GetByteCount($json)
+    $retainedFiles++
+    foreach($event in $events){
+      if($event.k -in 'token_count','token_usage_record' -and [int64]$event.l[0]+[int64]$event.l[2] -gt 0){
+        $date=Day (ParseTimestamp $event.a)
+        if(-not $historyStart -or $date -lt $historyStart){$historyStart=$date}
+      }
+    }
+    AddSourceEvents $events $true
+  }
+  $manifest=[ordered]@{version=$cacheVersion;parser=$parserFingerprint;source=$sourceKey;generated=([DateTimeOffset]::UtcNow.ToString('o'));files=@($newManifest)}
 
   $usage=@{};$tasks=@{};$compact=@{};$sn=0;$dupes=0;$supplementalRequests=0;[long]$supplementalTokens=0
   $coveredUsageStates=@{};$seenResponses=@{}
@@ -712,7 +835,8 @@ try {
   $skills.inventoryScope='known_local_skill_roots';$skills.inventory=$metadata.inventory
   $month=([DateTimeOffset]::UtcNow.ToOffset($tz)).ToString('yyyy-MM')
   $now=([DateTimeOffset]::UtcNow.ToOffset($tz)).ToString('yyyy-MM-dd HH:mm')
-  $data=[ordered]@{schema=2;usageScopeSchema=1;skills=$skills;generated=$now;month=$month;usage=@($usage.Values);tasks=@($tasks.Values);compactions=@($compact.Values);duplicates=$dupes;refresh=[ordered]@{files=$files.Count;reused=$reused;reparsed=$reparsed;migrated=$migrated;sourceBytes=$sourceBytes;sourceBytesRead=$sourceBytesRead;cacheBytesRead=$cacheBytesRead;cacheBytes=$cacheBytes;elapsedMs=$generationTimer.ElapsedMilliseconds;skillMetadata=$metadata.cost;supplementalTokenRequests=$supplementalRequests;supplementalTokens=$supplementalTokens}}
+  $historyStats=[ordered]@{schema=1;retainedFiles=$retainedFiles;recoveredFiles=$recoveredFiles;skippedCaches=$skippedCaches;startDate=$historyStart}
+  $data=[ordered]@{schema=2;usageScopeSchema=1;skills=$skills;generated=$now;month=$month;usage=@($usage.Values);tasks=@($tasks.Values);compactions=@($compact.Values);duplicates=$dupes;refresh=[ordered]@{files=$files.Count;reused=$reused;reparsed=$reparsed;migrated=$migrated;sourceBytes=$sourceBytes;sourceBytesRead=$sourceBytesRead;cacheBytesRead=$cacheBytesRead;cacheBytes=$cacheBytes;elapsedMs=$generationTimer.ElapsedMilliseconds;skillMetadata=$metadata.cost;supplementalTokenRequests=$supplementalRequests;supplementalTokens=$supplementalTokens;history=$historyStats}}
   $dataJson=$data|ConvertTo-Json -Depth 10 -Compress
 
   $webRoot=Join-Path $PSScriptRoot 'web'
@@ -725,6 +849,7 @@ try {
   foreach($marker in $uiContractMarkers){if(-not $html.Contains($marker)){throw "Dashboard UI contract missing: $marker"}}
   # Commit the data last: the service publishes it only after a successful exit.
   WriteAtomicText $out $html
+  WriteAtomicText $historyManifestPath ([ordered]@{schema=1;source=$sourceKey;files=@($historyEntries.Values|Sort-Object key)}|ConvertTo-Json -Depth 5 -Compress)
   WriteAtomicText $manifestPath ($manifest|ConvertTo-Json -Depth 5 -Compress)
   WriteAtomicText $dataOut $dataJson
   [ordered]@{status='ready';files=$files.Count;reused=$reused;reparsed=$reparsed;cacheVersion=$cacheVersion}|ConvertTo-Json -Compress
